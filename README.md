@@ -1,64 +1,60 @@
-# Comercial - Orçamentos Policópia
+# Flip Imobiliário PT
 
-Aplicação web construída com Next.js 14 (App Router) e Tailwind CSS para criar, gerir e exportar orçamentos comerciais da Policópia.
+Aplicação web em **Next.js 14 + TypeScript + Tailwind CSS** para análise de rentabilidade de operações de compra, reabilitação e revenda de imóveis em Portugal.
 
-## Pré-requisitos
+## Funcionalidades principais
+
+- Simulação completa por cenário (aquisição, obra, detenção, venda e fiscalidade).
+- Modos de tributação:
+  - Particular
+  - Empresa / Revenda profissional
+- Cálculo em tempo real de:
+  - Custo total
+  - Lucro bruto e líquido
+  - ROI
+  - Margem líquida
+  - Preço mínimo de venda (break-even)
+- Dashboard com cartões resumo, distribuição de custos e comparativo antes/depois de imposto.
+- Tabela detalhada de rubricas e cálculos fiscais.
+- Persistência local com `localStorage`.
+- Ferramentas: guardar, duplicar cenário, reset, exportar PDF, exportar CSV.
+- Comparação lado a lado entre dois cenários.
+- 2 cenários seed incluídos (particular + empresa com isenção de IMT para revenda).
+
+## Aviso importante
+
+A aplicação não assume automaticamente taxas camarárias, licenças municipais ou enquadramento legal do IVA reduzido sem input do utilizador.
+Todos os campos relevantes são parametrizáveis.
+
+## Requisitos
 
 - Node.js 20+
 - npm 10+
 
-## Instalação e execução
+## Executar localmente
 
 ```bash
 npm install
 npm run dev
 ```
 
-A aplicação ficará disponível em `http://localhost:3000`.
+Depois abrir: `http://localhost:3000`
 
-## Scripts disponíveis
+## Scripts
 
-- `npm run dev` – inicia o servidor de desenvolvimento Next.js.
-- `npm run build` – cria a versão otimizada para produção.
-- `npm run start` – arranca o servidor em modo produção (após `build`).
-- `npm run test` – executa os testes unitários de cálculo com Vitest.
+- `npm run dev` – ambiente de desenvolvimento
+- `npm run build` – build de produção
+- `npm run start` – execução da build
+- `npm run test` – testes Vitest existentes no projeto
 
-## Estrutura principal
+## Estrutura técnica relevante
 
-- `app/quotes/new` – formulário para novos orçamentos.
-- `app/quotes/[id]` – edição de orçamentos guardados.
-- `app/quotes` – listagem com pesquisa e ordenação.
-- `app/settings` – gestão de logótipo e dados institucionais.
-- `components/` – componentes reutilizáveis (formulário, totais, linhas, tabela de orçamentos, definições).
-- `lib/calc.ts` – lógica de cálculo (linhas, descontos, IVA) com testes em `lib/calc.test.ts`.
-- `data/settings/settings.json` – dados da empresa.
-- `data/quotes/*.json` – orçamentos guardados em formato JSON.
+- `types/scenario.ts` – tipos principais (`Scenario`, `AcquisitionCosts`, `RenovationCosts`, `HoldingCosts`, `SaleCosts`, `TaxSettings`, `CalculationResult`).
+- `lib/calculations.ts` – lógica de cálculo central e regras automáticas.
+- `lib/formatters.ts`, `lib/percentages.ts`, `lib/tax.ts`, `lib/validation.ts`, `lib/scenarioStorage.ts` – utilitários.
+- `data/seeds/scenarios.ts` – cenários seed.
+- `components/FlipApp.tsx` – interface principal da aplicação.
 
-## Funcionalidades chave
+## Nota legal (rodapé da app)
 
-- Autonumeração diária de orçamentos (`AAAA MM DD-###`).
-- Formulário validado com `react-hook-form` + `zod`.
-- Gestão de linhas com desconto por linha (€/%) e IVA editável.
-- Cálculo automático de base tributável, IVA por taxa, total, desconto global e portes.
-- Exportação para PDF (`html2pdf.js`) e DOCX (`docx`).
-- Atalho Ctrl+S para guardar rascunho.
-- Upload/drag-and-drop de imagens por linha.
-- Configuração de logótipo e rodapé institucional.
-- Persistência em ficheiros JSON e reabertura de orçamentos.
-
-## Dados
-
-- Ajuste o logótipo e contactos em `/settings` (guardado em `data/settings/settings.json`).
-- Os orçamentos são guardados em `data/quotes/` (um ficheiro JSON por orçamento).
-
-## Testes
-
-Os testes unitários cobrem cenários de cálculo (IVA múltiplo, descontos percentuais e valores absolutos). Execute-os com:
-
-```bash
-npm run test
-```
-
-## Licença
-
-Projeto interno Policópia.
+> “Simulação indicativa. Confirmar enquadramento fiscal, contabilístico e urbanístico com contabilista, advogado e câmara municipal.”
