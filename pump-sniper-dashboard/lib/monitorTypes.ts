@@ -9,7 +9,7 @@ export interface RiskFactors {
 }
 
 export interface TokenSnapshot {
-  mint: string;
+  mintAddress: string;
   symbol: string;
   createdAt: number;
   ageSeconds: number;
@@ -26,18 +26,21 @@ export interface TokenSnapshot {
 
 export interface Signal {
   id: string;
-  tokenMint: string;
+  mintAddress: string;
   tokenSymbol: string;
   side: "buy" | "sell";
   reason: string;
   confidence: number;
   createdAt: number;
   mode: TradingMode;
+  buysPerSecond: number;
+  riskScore: number;
+  volumeUsd: number;
 }
 
 export interface Position {
   id: string;
-  tokenMint: string;
+  mintAddress: string;
   tokenSymbol: string;
   entryPrice: number;
   quantity: number;
@@ -51,7 +54,7 @@ export interface Position {
 
 export interface TradeResult {
   id: string;
-  tokenMint: string;
+  mintAddress: string;
   tokenSymbol: string;
   side: "buy" | "sell";
   mode: TradingMode;

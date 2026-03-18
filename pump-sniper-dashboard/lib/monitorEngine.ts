@@ -7,6 +7,7 @@ import {
   RiskFactors,
   TokenSnapshot,
   TradeResult,
+  Signal,
 } from "./monitorTypes";
 
 const DEFAULT_SETTINGS: MonitorSettings = {
@@ -31,6 +32,17 @@ const DEFAULT_SETTINGS: MonitorSettings = {
     maxOrderUsd: 50,
   },
 };
+
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function randomBase58(length: number): string {
+  return Array.from({ length }, () => BASE58[Math.floor(Math.random() * BASE58.length)]).join("");
+}
+
+function generateMockMintAddress(): string {
+  // mock full mint format close to Pump.fun mints
+  return `${randomBase58(40)}pump`;
+}
 
 class MonitorEngine extends EventEmitter {
   private state: MonitorState;
@@ -71,7 +83,7 @@ class MonitorEngine extends EventEmitter {
     if (this.ticker) return;
     this.state.connected = true;
     this.log("Motor Pump monitor iniciado");
-    this.ticker = setInterval(() => this.tick(), 1500);
+    this.ticker = setInterval(() => this.tick(), 700);
     this.ticker.unref();
   }
 
@@ -93,7 +105,7 @@ class MonitorEngine extends EventEmitter {
 
   private tick() {
     const token = this.generateToken();
-    this.state.tokens = [token, ...this.state.tokens].slice(0, 80);
+    this.state.tokens = [token, ...this.state.tokens].slice(0, 100);
     this.evaluateSignal(token);
     this.updatePositions(token);
     this.state.lastEventAt = Date.now();
@@ -106,7 +118,7 @@ class MonitorEngine extends EventEmitter {
 
     this.tradeTimestamps = this.tradeTimestamps.filter((ts) => Date.now() - ts < 3600_000);
 
-    const lastTradeAt = this.cooldownByMint.get(token.mint);
+    const lastTradeAt = this.cooldownByMint.get(token.mintAddress);
     const isCooldown = !canTradeByCooldown(lastTradeAt, strategy.cooldownSeconds, Date.now());
 
     const shouldBuy =
@@ -120,17 +132,21 @@ class MonitorEngine extends EventEmitter {
 
     const reason = `buy/s ${token.buysPerSecond.toFixed(2)}, risco ${token.riskScore.toFixed(0)}, vol ${token.volumeUsd.toFixed(0)}`;
 
-    this.state.signals.unshift({
+    const signal: Signal = {
       id: crypto.randomUUID(),
-      tokenMint: token.mint,
+      mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
       side: "buy",
       reason,
       confidence: Math.max(1, 100 - token.riskScore),
       createdAt: Date.now(),
       mode: "paper",
-    });
-    this.state.signals = this.state.signals.slice(0, 120);
+      buysPerSecond: token.buysPerSecond,
+      riskScore: token.riskScore,
+      volumeUsd: token.volumeUsd,
+    };
+
+    this.state.signals = [signal, ...this.state.signals.filter((existing) => existing.id !== signal.id)].slice(0, 30);
     this.state.metrics.totalSignals += 1;
 
     this.openPaperPosition(token, reason);
@@ -139,7 +155,7 @@ class MonitorEngine extends EventEmitter {
       void this.executeRealBuy(token, reason);
     }
 
-    this.cooldownByMint.set(token.mint, Date.now());
+    this.cooldownByMint.set(token.mintAddress, Date.now());
     this.tradeTimestamps.push(Date.now());
   }
 
@@ -153,7 +169,7 @@ class MonitorEngine extends EventEmitter {
     const quantity = size / token.price;
     const position: Position = {
       id: crypto.randomUUID(),
-      tokenMint: token.mint,
+      mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
       entryPrice: token.price,
       quantity,
@@ -170,7 +186,7 @@ class MonitorEngine extends EventEmitter {
 
     this.recordTrade({
       id: crypto.randomUUID(),
-      tokenMint: token.mint,
+      mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
       side: "buy",
       mode: "paper",
@@ -187,7 +203,7 @@ class MonitorEngine extends EventEmitter {
     const toClose: Position[] = [];
 
     for (const position of this.state.positions) {
-      if (position.tokenMint !== token.mint) continue;
+      if (position.mintAddress !== token.mintAddress) continue;
       position.highestPrice = Math.max(position.highestPrice, token.price);
 
       if (position.trailingStopPct) {
@@ -217,7 +233,7 @@ class MonitorEngine extends EventEmitter {
 
     this.recordTrade({
       id: crypto.randomUUID(),
-      tokenMint: position.tokenMint,
+      mintAddress: position.mintAddress,
       tokenSymbol: position.tokenSymbol,
       side: "sell",
       mode: position.mode,
@@ -261,7 +277,7 @@ class MonitorEngine extends EventEmitter {
 
       this.recordTrade({
         id: crypto.randomUUID(),
-        tokenMint: token.mint,
+        mintAddress: token.mintAddress,
         tokenSymbol: token.symbol,
         side: "buy",
         mode: "real",
@@ -289,7 +305,7 @@ class MonitorEngine extends EventEmitter {
     };
 
     return {
-      mint: `MINT_${Math.random().toString(36).slice(2, 10)}`,
+      mintAddress: generateMockMintAddress(),
       symbol: `P${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
       createdAt: now,
       ageSeconds: Math.floor(Math.random() * 20),

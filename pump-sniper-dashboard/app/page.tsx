@@ -1,10 +1,14 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { MonitorState } from "../lib/monitorTypes";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { MonitorState, Signal, TokenSnapshot } from "../lib/monitorTypes";
 
 function fmtUsd(n: number) {
   return n.toLocaleString("pt-PT", { style: "currency", currency: "USD" });
+}
+
+function phantomLink(mintAddress: string) {
+  return `https://trade.phantom.com/token/${mintAddress}`;
 }
 
 async function fetchState(): Promise<MonitorState> {
@@ -17,12 +21,44 @@ export default function HomePage() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [riskFilter, setRiskFilter] = useState(70);
   const [status, setStatus] = useState<"connecting" | "connected" | "fallback">("connecting");
+  const [freshSignalIds, setFreshSignalIds] = useState<Set<string>>(new Set());
+  const seenSignalIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let mounted = true;
     let polling: ReturnType<typeof setInterval> | null = null;
 
-    fetchState().then((data) => mounted && setState(data)).catch(() => undefined);
+    const applyState = (incoming: MonitorState) => {
+      if (!mounted) return;
+
+      const dedupSignals = Array.from(new Map(incoming.signals.map((signal) => [signal.id, signal])).values()).slice(0, 30);
+      const normalized = { ...incoming, signals: dedupSignals };
+
+      const newIds = dedupSignals
+        .filter((signal) => !seenSignalIds.current.has(signal.id))
+        .map((signal) => signal.id);
+
+      dedupSignals.forEach((signal) => seenSignalIds.current.add(signal.id));
+      setState(normalized);
+
+      if (newIds.length > 0) {
+        setFreshSignalIds((prev) => {
+          const next = new Set(prev);
+          newIds.forEach((id) => next.add(id));
+          return next;
+        });
+
+        setTimeout(() => {
+          setFreshSignalIds((prev) => {
+            const next = new Set(prev);
+            newIds.forEach((id) => next.delete(id));
+            return next;
+          });
+        }, 3000);
+      }
+    };
+
+    fetchState().then((data) => applyState(data)).catch(() => undefined);
 
     const source = new EventSource("/api/monitor/events");
     source.onopen = () => {
@@ -33,7 +69,7 @@ export default function HomePage() {
         polling = null;
       }
     };
-    source.onmessage = (ev) => mounted && setState(JSON.parse(ev.data));
+    source.onmessage = (ev) => applyState(JSON.parse(ev.data));
     source.onerror = () => {
       if (!mounted) return;
       setStatus("fallback");
@@ -41,11 +77,11 @@ export default function HomePage() {
         polling = setInterval(async () => {
           try {
             const snapshot = await fetchState();
-            if (mounted) setState(snapshot);
+            applyState(snapshot);
           } catch {
             // continue
           }
-        }, 2000);
+        }, 900);
       }
     };
 
@@ -56,9 +92,9 @@ export default function HomePage() {
     };
   }, []);
 
-  const filtered = useMemo(() => {
+  const filteredTokens = useMemo(() => {
     if (!state) return [];
-    return state.tokens.filter((t) => t.riskScore <= riskFilter).slice(0, 30);
+    return state.tokens.filter((token) => token.riskScore <= riskFilter).slice(0, 30);
   }, [state, riskFilter]);
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
@@ -97,9 +133,9 @@ export default function HomePage() {
   }
 
   return (
-    <main style={{ padding: 24, maxWidth: 1300, margin: "0 auto" }}>
+    <main style={{ padding: 24, maxWidth: 1380, margin: "0 auto", color: "#e2e8f0" }}>
       <h1 style={{ marginBottom: 8 }}>Pump Sniper Dashboard</h1>
-      <p style={{ opacity: 0.85, marginTop: 0 }}>Status: {status === "connected" ? "Tempo real (SSE)" : "Fallback polling"}</p>
+      <p style={{ opacity: 0.85, marginTop: 0 }}>Status: {status === "connected" ? "Tempo real (SSE)" : "Fallback polling rápido"}</p>
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12, marginBottom: 18 }}>
         <Card label="Saldo virtual" value={fmtUsd(state.balances.paperUsd)} />
@@ -147,26 +183,70 @@ export default function HomePage() {
           </tr>
         </thead>
         <tbody>
-          {filtered.map((t) => (
-            <tr key={t.mint} style={{ borderTop: "1px solid #1e293b" }}>
-              <td>{t.symbol}</td>
-              <td>{t.price.toFixed(6)}</td>
-              <td>{fmtUsd(t.volumeUsd)}</td>
-              <td>{t.buysPerSecond}</td>
-              <td>{t.uniqueWallets}</td>
-              <td>{t.topWalletShare.toFixed(1)}%</td>
-              <td>{t.riskScore.toFixed(1)}</td>
-            </tr>
+          {filteredTokens.map((token) => (
+            <TokenRow key={token.mintAddress} token={token} />
           ))}
         </tbody>
       </table>
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 12 }}>
-        <Panel title="Sinais" items={state.signals.slice(0, 15).map((s) => `${s.tokenSymbol} ${s.side.toUpperCase()} - ${s.reason}`)} />
-        <Panel title="Trades" items={state.tradeHistory.slice(0, 15).map((t) => `${t.mode.toUpperCase()} ${t.side.toUpperCase()} ${t.tokenSymbol} PnL ${fmtUsd(t.pnlUsd)}`)} />
-        <Panel title="Logs" items={state.logs.slice(0, 15)} />
+        <SignalsPanel signals={state.signals.slice(0, 30)} freshSignalIds={freshSignalIds} />
+        <Panel title="Trades" items={state.tradeHistory.slice(0, 20).map((trade) => `${trade.mode.toUpperCase()} ${trade.side.toUpperCase()} ${trade.tokenSymbol} PnL ${fmtUsd(trade.pnlUsd)}`)} />
+        <Panel title="Logs" items={state.logs.slice(0, 20)} />
       </section>
     </main>
+  );
+}
+
+function TokenRow({ token }: { token: TokenSnapshot }) {
+  return (
+    <tr style={{ borderTop: "1px solid #1e293b" }}>
+      <td>
+        <a className="token-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
+          <strong>{token.symbol}</strong>
+        </a>
+        <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>
+          <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
+            {token.mintAddress}
+          </a>
+        </div>
+      </td>
+      <td>{token.price.toFixed(6)}</td>
+      <td>{fmtUsd(token.volumeUsd)}</td>
+      <td>{token.buysPerSecond.toFixed(2)}</td>
+      <td>{token.uniqueWallets}</td>
+      <td>{token.topWalletShare.toFixed(1)}%</td>
+      <td>{token.riskScore.toFixed(1)}</td>
+    </tr>
+  );
+}
+
+function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {
+  return (
+    <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, background: "#0f172a" }}>
+      <h3 style={{ marginTop: 0 }}>Sinais (tempo quase real)</h3>
+      <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
+        {signals.map((signal) => {
+          const isFresh = freshSignalIds.has(signal.id);
+          return (
+            <li key={signal.id} className={isFresh ? "signal-item signal-fresh" : "signal-item"}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+                <a className="token-link" href={phantomLink(signal.mintAddress)} target="_blank" rel="noreferrer">
+                  <strong>{signal.tokenSymbol}</strong>
+                </a>
+                <span style={{ opacity: 0.8 }}>{new Date(signal.createdAt).toLocaleTimeString("pt-PT")}</span>
+              </div>
+              <a className="mint-link" href={phantomLink(signal.mintAddress)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
+                {signal.mintAddress}
+              </a>
+              <div style={{ marginTop: 4, fontSize: 13 }}>
+                buys/s <strong>{signal.buysPerSecond.toFixed(2)}</strong> · risco <strong>{signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

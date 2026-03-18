@@ -1,3 +1,32 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; font-family: Inter, Arial, sans-serif; }
 input, button { font: inherit; }
+
+a { color: #93c5fd; text-decoration: none; }
+a:hover { color: #bfdbfe; text-decoration: underline; }
+
+.token-link { color: #e2e8f0; }
+.token-link:hover { color: #a5f3fc; }
+
+.mint-link {
+  color: #94a3b8;
+  word-break: break-all;
+}
+
+.signal-item {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 8px;
+  background: #111827;
+}
+
+.signal-fresh {
+  animation: signalFlash 2.8s ease;
+  border-color: #22d3ee;
+  box-shadow: 0 0 0 1px #22d3ee33;
+}
+
+@keyframes signalFlash {
+  from { background: #164e63; }
+  to { background: #111827; }
+}
