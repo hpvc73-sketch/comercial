@@ -267,6 +267,7 @@ class MonitorEngine extends EventEmitter {
     if (isPumpPortalTrade) token.pumpPortalTradeCount += 1;
     if (event.eventType === "trade") {
       token.firstTradeAt = token.firstTradeAt ? Math.min(token.firstTradeAt, event.timestamp) : event.timestamp;
+      if (token.firstTradeConfidence === "unknown") token.firstTradeConfidence = "live";
       this.log(`age-derivation first trade at ${new Date(token.firstTradeAt).toISOString()} ${token.mintAddress}`);
     }
     const ageEvidence = this.deriveAgeEvidence(token);
@@ -409,7 +410,11 @@ class MonitorEngine extends EventEmitter {
         const lifecycle: TokenSnapshot["lifecycle"] =
           token.parsedTradeCount >= 1 && hasRealAge ? "tradable" : token.parsedTradeCount >= 1 ? "enriched" : "discovered";
         token.lifecycle = lifecycle;
-        const sniperReady = lifecycle === "tradable" && realTokenAgeSeconds !== null && realTokenAgeSeconds <= HARD_MAX_TOKEN_AGE_SECONDS;
+        const sniperReady =
+          lifecycle === "tradable" &&
+          chosenAgeSource !== "estimated" &&
+          realTokenAgeSeconds !== null &&
+          realTokenAgeSeconds <= HARD_MAX_TOKEN_AGE_SECONDS;
         if (realTokenAgeSeconds !== null && realTokenAgeSeconds > HARD_MAX_TOKEN_AGE_SECONDS && !this.staleAgeWarned.has(token.mintAddress)) {
           this.staleAgeWarned.add(token.mintAddress);
           this.log(`rejected as stale because of real age ${realTokenAgeSeconds}s source=${chosenAgeSource} ${token.mintAddress}`);
@@ -680,8 +685,10 @@ class MonitorEngine extends EventEmitter {
     const source: TokenSnapshot["ageSource"] =
       launchCreatedAt !== null
         ? "launch"
-        : token.firstTradeAt !== null
+        : token.firstTradeAt !== null && token.firstTradeConfidence === "history"
             ? "first-trade"
+            : token.firstTradeAt !== null
+              ? "estimated"
             : token.tokenCreatedAt !== null
               ? token.tokenAgeSource
               : "unknown";
@@ -713,6 +720,28 @@ class MonitorEngine extends EventEmitter {
     this.enrichmentInFlight.add(mintAddress);
 
     try {
+      const [providerMeta, dexMeta] = await Promise.all([
+        this.fetchProviderMetadata(mintAddress),
+        this.fetchDexScreenerMetadata(mintAddress),
+      ]);
+
+      if ((token.symbol === "UNKNOWN" || token.name === "Unknown Token") && (providerMeta?.symbol || providerMeta?.name)) {
+        token.symbol = providerMeta?.symbol ?? token.symbol;
+        token.name = providerMeta?.name ?? token.name;
+      }
+      if ((token.symbol === "UNKNOWN" || token.name === "Unknown Token") && (dexMeta?.symbol || dexMeta?.name)) {
+        token.symbol = dexMeta?.symbol ?? token.symbol;
+        token.name = dexMeta?.name ?? token.name;
+      }
+      if (providerMeta?.createdAt) {
+        token.tokenCreatedAt = token.tokenCreatedAt ? Math.min(token.tokenCreatedAt, providerMeta.createdAt) : providerMeta.createdAt;
+        token.tokenAgeSource = "provider";
+      }
+      if (dexMeta?.pairCreatedAt) {
+        token.pairCreatedAt = token.pairCreatedAt ? Math.min(token.pairCreatedAt, dexMeta.pairCreatedAt) : dexMeta.pairCreatedAt;
+        if (!token.tokenCreatedAt || token.pairCreatedAt < token.tokenCreatedAt) token.tokenAgeSource = "launch";
+      }
+
       const signatures = await this.fetchHistoricalSignatures(mintAddress, 4, 100);
       if (!signatures || signatures.length === 0) {
         token.lifecycle = "discovered";
@@ -766,7 +795,10 @@ class MonitorEngine extends EventEmitter {
       if (parsedTrades > 0) {
         token.parsedTradeCount = parsedTrades;
         wallets.forEach((wallet) => token.buyerWallets.add(wallet));
-        if (!token.firstTradeAt && Number.isFinite(earliestBlockTimeMs)) token.firstTradeAt = earliestBlockTimeMs;
+        if (Number.isFinite(earliestBlockTimeMs)) {
+          token.firstTradeAt = token.firstTradeAt ? Math.min(token.firstTradeAt, earliestBlockTimeMs) : earliestBlockTimeMs;
+          token.firstTradeConfidence = "history";
+        }
         token.lifecycle = "enriched";
         this.log(`helius enriched ${mintAddress}: parsedTrades=${parsedTrades}, wallets=${wallets.size}`);
       } else {
@@ -830,6 +862,42 @@ class MonitorEngine extends EventEmitter {
       return result ?? [];
     } catch {
       return [];
+    }
+  }
+
+  private async fetchProviderMetadata(mintAddress: string): Promise<{ name?: string; symbol?: string; createdAt?: number } | null> {
+    try {
+      const asset = await this.callHeliusRpc<Record<string, unknown>>("getAsset", [{ id: mintAddress }]);
+      const content = (asset?.content as { metadata?: { name?: string; symbol?: string }; createdAt?: number } | undefined);
+      const tokenInfo = (asset?.token_info as { created_at?: number } | undefined);
+      const createdAtRaw = tokenInfo?.created_at ?? content?.createdAt;
+      const createdAt = typeof createdAtRaw === "number" ? (createdAtRaw < 1_000_000_000_000 ? createdAtRaw * 1000 : createdAtRaw) : undefined;
+      return {
+        name: content?.metadata?.name,
+        symbol: content?.metadata?.symbol,
+        createdAt,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchDexScreenerMetadata(mintAddress: string): Promise<{ name?: string; symbol?: string; pairCreatedAt?: number } | null> {
+    try {
+      const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`);
+      if (!res.ok) return null;
+      const data = (await res.json()) as {
+        pairs?: Array<{ pairCreatedAt?: number; baseToken?: { name?: string; symbol?: string } }>;
+      };
+      const first = data.pairs?.[0];
+      if (!first) return null;
+      return {
+        name: first.baseToken?.name,
+        symbol: first.baseToken?.symbol,
+        pairCreatedAt: first.pairCreatedAt,
+      };
+    } catch {
+      return null;
     }
   }
 
