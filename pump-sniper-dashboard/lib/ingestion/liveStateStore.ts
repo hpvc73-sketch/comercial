@@ -29,6 +29,9 @@ export interface LiveTokenState {
     solAmount?: number;
   }>;
   pumpPortalTradeCount: number;
+  parsedTradeCount: number;
+  lifecycle: "discovered" | "enriched" | "tradable";
+  enrichmentWarning?: string;
   detectedAtBySource: Map<DataSource, number>;
   firstDetectedSource: DataSource;
   firstDetectedAt: number;
@@ -62,6 +65,8 @@ export class LiveStateStore {
       sellTimestamps: [],
       recentTrades: [],
       pumpPortalTradeCount: 0,
+      parsedTradeCount: 0,
+      lifecycle: "discovered",
       detectedAtBySource: new Map<DataSource, number>([[defaults.source, defaults.timestamp]]),
       firstDetectedSource: defaults.source,
       firstDetectedAt: defaults.timestamp,

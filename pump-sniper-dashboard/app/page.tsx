@@ -232,6 +232,7 @@ export default function HomePage() {
             <th align="left">Concentração</th>
             <th align="left">Risco</th>
             <th align="left">Fonte</th>
+            <th align="left">Lifecycle</th>
             <th align="left">Estado</th>
           </tr>
         </thead>
@@ -269,6 +270,12 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
       <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
       <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
+      <td>
+        <strong>{token.lifecycle}</strong>
+        <div style={{ fontSize: 11, opacity: 0.8 }}>
+          parsed trades: {token.parsedTradeCount} · ready: {token.sniperReady ? "yes" : "no"}
+        </div>
+      </td>
       <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.confirmationStatus === "confirmed" ? token.discoveryStatus : "partial"} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>quality: <strong>{token.dataQuality}</strong> · Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
     </tr>
   );

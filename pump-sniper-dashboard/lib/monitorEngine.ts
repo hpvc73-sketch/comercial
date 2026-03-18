@@ -52,6 +52,9 @@ class MonitorEngine extends EventEmitter {
 
   private staleTimer?: NodeJS.Timeout;
   private lastDebugLogAt = 0;
+  private heliusRpcUrl?: string;
+  private enrichmentInFlight = new Set<string>();
+  private lastHeliusPlanWarningAt = 0;
 
   constructor() {
     super();
@@ -94,6 +97,7 @@ class MonitorEngine extends EventEmitter {
     const heliusRpcUrl =
       process.env.HELIUS_RPC_URL ??
       (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : undefined);
+    this.heliusRpcUrl = heliusRpcUrl;
 
     const solanaRpcUrl =
       process.env.SOLANA_RPC_URL ??
@@ -192,6 +196,7 @@ class MonitorEngine extends EventEmitter {
       volumeUsd: event.volumeUsd,
     });
     this.adapters.forEach((adapter) => adapter.registerMint?.(event.mintAddress as string));
+    this.enrichFromHeliusIfNeeded(token.mintAddress);
 
     token.updatedAt = event.timestamp;
     if (event.symbol) token.symbol = event.symbol;
@@ -337,6 +342,7 @@ class MonitorEngine extends EventEmitter {
 
         const preferredSource = token.pumpPortalTradeCount > 0 ? "pumpportal" : token.firstDetectedSource;
 
+        const hasRealAge = token.tokenCreatedAt > 0;
         const qualitySignals = [
           token.priceUsd !== null,
           token.volumeUsd !== null,
@@ -348,6 +354,10 @@ class MonitorEngine extends EventEmitter {
         const ageSeconds = Math.floor((now - token.tokenCreatedAt) / 1000);
         const freshness: TokenSnapshot["freshness"] =
           ageSeconds <= FRESH_TOKEN_AGE_SECONDS ? "fresh" : ageSeconds <= HARD_MAX_TOKEN_AGE_SECONDS ? "aging" : "late";
+        const lifecycle: TokenSnapshot["lifecycle"] =
+          token.parsedTradeCount >= 1 && hasRealAge ? "tradable" : token.parsedTradeCount >= 1 ? "enriched" : "discovered";
+        token.lifecycle = lifecycle;
+        const sniperReady = lifecycle === "tradable";
 
         return {
           mintAddress: token.mintAddress,
@@ -356,6 +366,9 @@ class MonitorEngine extends EventEmitter {
           sourceLatencyMs,
           discoveryStatus: token.discoveryStatus,
           confirmationStatus: token.confirmationStatus,
+          lifecycle,
+          sniperReady,
+          parsedTradeCount: token.parsedTradeCount,
           isValidPumpCandidate: true,
           symbol: token.symbol,
           name: token.name,
@@ -451,6 +464,7 @@ class MonitorEngine extends EventEmitter {
     const isCooldown = !canTradeByCooldown(lastTradeAt, strategy.cooldownSeconds, Date.now());
 
     const shouldBuy =
+      token.sniperReady &&
       token.buysPerSecond >= strategy.minBuysPerSecond &&
       token.riskScore !== null &&
       token.riskScore <= strategy.maxRiskScore &&
@@ -572,6 +586,93 @@ class MonitorEngine extends EventEmitter {
   private recordTrade(trade: TradeResult) {
     this.state.tradeHistory.unshift(trade);
     this.state.tradeHistory = this.state.tradeHistory.slice(0, 200);
+  }
+
+  private async enrichFromHeliusIfNeeded(mintAddress: string) {
+    const token = this.store.all().find((entry) => entry.mintAddress === mintAddress);
+    if (!token) return;
+    if (token.parsedTradeCount > 0) return;
+    if (!this.heliusRpcUrl) {
+      if (Date.now() - this.lastHeliusPlanWarningAt > 60_000) {
+        this.lastHeliusPlanWarningAt = Date.now();
+        this.log("Helius enrichment disabled: missing HELIUS_RPC_URL / HELIUS_API_KEY");
+      }
+      return;
+    }
+    if (this.enrichmentInFlight.has(mintAddress)) return;
+    this.enrichmentInFlight.add(mintAddress);
+
+    try {
+      const signatures = await this.callHeliusRpc<{ signature: string }[]>("getSignaturesForAddress", [mintAddress, { limit: 12 }]);
+      if (!signatures || signatures.length === 0) {
+        token.lifecycle = "discovered";
+        return;
+      }
+
+      let earliestBlockTimeMs = Number.POSITIVE_INFINITY;
+      const wallets = new Set<string>();
+      let parsedTrades = 0;
+
+      for (const sig of signatures.slice(0, 8)) {
+        const tx = await this.callHeliusRpc<Record<string, unknown> | null>("getTransaction", [
+          sig.signature,
+          { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" },
+        ]);
+        if (!tx) continue;
+
+        const blockTime = typeof tx.blockTime === "number" ? tx.blockTime * 1000 : undefined;
+        if (blockTime && blockTime < earliestBlockTimeMs) earliestBlockTimeMs = blockTime;
+
+        const meta = (tx.meta as { preTokenBalances?: Array<Record<string, unknown>>; postTokenBalances?: Array<Record<string, unknown>> } | undefined);
+        const tokenBalances = [...(meta?.preTokenBalances ?? []), ...(meta?.postTokenBalances ?? [])];
+        const touchesMint = tokenBalances.some((entry) => entry?.mint === mintAddress);
+        if (!touchesMint) continue;
+
+        parsedTrades += 1;
+        for (const balance of tokenBalances) {
+          if (balance?.mint !== mintAddress) continue;
+          const owner = typeof balance.owner === "string" ? balance.owner : undefined;
+          if (owner) wallets.add(owner);
+        }
+      }
+
+      if (Number.isFinite(earliestBlockTimeMs)) token.tokenCreatedAt = Math.min(token.tokenCreatedAt, earliestBlockTimeMs);
+      if (parsedTrades > 0) {
+        token.parsedTradeCount = parsedTrades;
+        wallets.forEach((wallet) => token.buyerWallets.add(wallet));
+        token.lifecycle = "enriched";
+        this.log(`helius enriched ${mintAddress}: parsedTrades=${parsedTrades}, wallets=${wallets.size}`);
+      } else {
+        token.lifecycle = "discovered";
+      }
+    } catch (error) {
+      const message = (error as Error).message ?? "unknown error";
+      token.enrichmentWarning = message;
+      if (message.includes("429") || message.includes("403")) {
+        this.log(`Helius enrichment limited by plan/rate limits (${message}); degrading gracefully.`);
+      } else {
+        this.log(`Helius enrichment failed for ${mintAddress}: ${message}`);
+      }
+    } finally {
+      this.enrichmentInFlight.delete(mintAddress);
+      this.refreshStateFromStore();
+      this.emitUpdate();
+    }
+  }
+
+  private async callHeliusRpc<T>(method: string, params: unknown[]): Promise<T> {
+    if (!this.heliusRpcUrl) throw new Error("Helius RPC URL not configured");
+    const res = await fetch(this.heliusRpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method, params }),
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { result?: T; error?: { message?: string } };
+    if (data.error) throw new Error(data.error.message ?? "rpc error");
+    if (data.result === undefined) throw new Error("empty rpc result");
+    return data.result;
   }
 
   private log(message: string) {

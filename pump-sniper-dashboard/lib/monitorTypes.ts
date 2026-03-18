@@ -15,6 +15,9 @@ export interface TokenSnapshot {
   sourceLatencyMs: Record<string, number>;
   discoveryStatus: "discovered" | "migrated" | "stale";
   confirmationStatus: "unconfirmed" | "confirmed";
+  lifecycle: "discovered" | "enriched" | "tradable";
+  sniperReady: boolean;
+  parsedTradeCount: number;
   isValidPumpCandidate: boolean;
   symbol: string;
   name: string;
