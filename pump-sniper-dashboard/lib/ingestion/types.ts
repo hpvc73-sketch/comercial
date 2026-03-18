@@ -11,6 +11,7 @@ export interface UnifiedTokenEvent {
   name?: string;
   timestamp: number;
   tokenCreatedAt?: number;
+  pairCreatedAt?: number;
   discoveryStatus?: DiscoveryStatus;
   confirmationStatus?: ConfirmationStatus;
   priceUsd?: number;

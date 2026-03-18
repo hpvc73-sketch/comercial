@@ -276,7 +276,12 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{fmtUsd(token.volumeUsd)}</td>
       <td>{fmtNumber(token.buysPerSecond, 2)}</td>
       <td>{token.uniqueWallets ?? "N/A"}</td>
-      <td>{formatAge(token.realTokenAgeSeconds, token.realAgeQuality)}</td>
+      <td>
+        {formatAge(token.realTokenAgeSeconds, token.realAgeQuality)}
+        <div style={{ fontSize: 11, opacity: 0.8 }}>
+          <span className="badge-source">{token.ageSource}</span>
+        </div>
+      </td>
       <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
       <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
       <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
@@ -287,6 +292,10 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
         </div>
         <div style={{ fontSize: 11, opacity: 0.8 }}>
           real age: {formatAge(token.realTokenAgeSeconds, token.realAgeQuality)} · seen by bot: {formatAge(token.seenByBotAgeSeconds, "exact")}
+        </div>
+        <div style={{ fontSize: 11, opacity: 0.8 }}>
+          real creation time: {fmtTimestamp(token.tokenCreatedAt)} · first trade: {fmtTimestamp(token.firstTradeAt)} · seen by bot time:{" "}
+          {fmtTimestamp(token.firstSeenTimestamp)}
         </div>
         <div style={{ fontSize: 11, opacity: 0.8 }}>
           last metric: {new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}
@@ -304,6 +313,11 @@ function formatAge(seconds: number | null, quality: "exact" | "estimated" | "unk
   const rem = seconds % 60;
   const base = rem === 0 ? `${minutes}m` : `${minutes}m ${rem}s`;
   return quality === "estimated" ? `~${base}` : base;
+}
+
+function fmtTimestamp(value: number | null) {
+  if (!value) return "unknown";
+  return new Date(value).toLocaleString("pt-PT");
 }
 
 function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {

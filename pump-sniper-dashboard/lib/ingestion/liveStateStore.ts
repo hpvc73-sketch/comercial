@@ -8,8 +8,11 @@ export interface LiveTokenState {
   discoveryStatus: DiscoveryStatus;
   confirmationStatus: ConfirmationStatus;
   createdAt: number;
+  seenByBotAt: number;
   tokenCreatedAt: number | null;
-  tokenAgeSource: "provider" | "chain" | "estimated" | "unknown";
+  pairCreatedAt: number | null;
+  firstTradeAt: number | null;
+  tokenAgeSource: "launch" | "pair" | "first-trade" | "on-chain" | "provider" | "estimated" | "unknown";
   updatedAt: number;
   priceUsd: number | null;
   volumeUsd: number | null;
@@ -53,8 +56,11 @@ export class LiveStateStore {
       discoveryStatus: defaults.discoveryStatus ?? "discovered",
       confirmationStatus: defaults.confirmationStatus ?? "unconfirmed",
       createdAt: defaults.timestamp,
+      seenByBotAt: defaults.timestamp,
       tokenCreatedAt: defaults.tokenCreatedAt ?? null,
-      tokenAgeSource: defaults.tokenCreatedAt ? "provider" : "unknown",
+      pairCreatedAt: defaults.pairCreatedAt ?? null,
+      firstTradeAt: null,
+      tokenAgeSource: defaults.tokenCreatedAt ? "provider" : defaults.pairCreatedAt ? "pair" : "unknown",
       updatedAt: defaults.timestamp,
       priceUsd: defaults.priceUsd ?? null,
       volumeUsd: defaults.volumeUsd ?? null,

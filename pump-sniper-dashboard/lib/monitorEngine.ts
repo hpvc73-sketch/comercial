@@ -3,7 +3,7 @@ import { canTradeByCooldown, computeRiskScore } from "./monitorMath";
 import { MonitorSettings, MonitorState, Position, Signal, TokenSnapshot, TradeResult } from "./monitorTypes";
 import { EventDeduplicator } from "./ingestion/deduplicator";
 import { HealthMonitor } from "./ingestion/healthMonitor";
-import { LiveStateStore } from "./ingestion/liveStateStore";
+import { LiveStateStore, LiveTokenState } from "./ingestion/liveStateStore";
 import { PumpPortalAdapter } from "./ingestion/adapters/pumpPortalAdapter";
 import { SolanaRpcAdapter } from "./ingestion/adapters/solanaRpcAdapter";
 import { HeliusGrpcAdapter } from "./ingestion/adapters/heliusGrpcAdapter";
@@ -58,6 +58,8 @@ class MonitorEngine extends EventEmitter {
   private lastHeliusPlanWarningAt = 0;
   private streamEventTimestamps: number[] = [];
   private lastStallWarningAt = 0;
+  private staleAgeWarned = new Set<string>();
+  private lastAgeSourceLog = new Map<string, string>();
 
   constructor() {
     super();
@@ -207,6 +209,7 @@ class MonitorEngine extends EventEmitter {
       source: event.source,
       timestamp: event.timestamp,
       tokenCreatedAt: event.tokenCreatedAt,
+      pairCreatedAt: event.pairCreatedAt,
       symbol: event.symbol,
       name: event.name,
       discoveryStatus: event.discoveryStatus,
@@ -232,6 +235,12 @@ class MonitorEngine extends EventEmitter {
     if (event.tokenCreatedAt && event.tokenCreatedAt > 0) {
       token.tokenCreatedAt = token.tokenCreatedAt ? Math.min(token.tokenCreatedAt, event.tokenCreatedAt) : event.tokenCreatedAt;
       token.tokenAgeSource = "provider";
+      this.log(`age-derivation token created at ${new Date(token.tokenCreatedAt).toISOString()} source=provider ${token.mintAddress}`);
+    }
+    if (event.pairCreatedAt && event.pairCreatedAt > 0) {
+      token.pairCreatedAt = token.pairCreatedAt ? Math.min(token.pairCreatedAt, event.pairCreatedAt) : event.pairCreatedAt;
+      if (!token.tokenCreatedAt || token.pairCreatedAt < token.tokenCreatedAt) token.tokenAgeSource = "pair";
+      this.log(`age-derivation pair created at ${new Date(token.pairCreatedAt).toISOString()} ${token.mintAddress}`);
     }
 
     if (event.source === "pumpportal" && event.eventType === "discovered") {
@@ -256,6 +265,18 @@ class MonitorEngine extends EventEmitter {
     const canUseSecondary = token.pumpPortalTradeCount === 0;
 
     if (isPumpPortalTrade) token.pumpPortalTradeCount += 1;
+    if (event.eventType === "trade") {
+      token.firstTradeAt = token.firstTradeAt ? Math.min(token.firstTradeAt, event.timestamp) : event.timestamp;
+      this.log(`age-derivation first trade at ${new Date(token.firstTradeAt).toISOString()} ${token.mintAddress}`);
+    }
+    const ageEvidence = this.deriveAgeEvidence(token);
+    const ageLogKey = `${ageEvidence.source}:${ageEvidence.createdAt ?? "na"}`;
+    if (this.lastAgeSourceLog.get(token.mintAddress) !== ageLogKey) {
+      this.lastAgeSourceLog.set(token.mintAddress, ageLogKey);
+      this.log(
+        `age-derivation chosen source=${ageEvidence.source} value=${ageEvidence.createdAt ? new Date(ageEvidence.createdAt).toISOString() : "unknown"} ${token.mintAddress}`,
+      );
+    }
 
     const shouldApplyMetrics = isPumpPortalTrade || canUseSecondary;
     if (shouldApplyMetrics && event.priceUsd && event.priceUsd > 0) {
@@ -360,7 +381,8 @@ class MonitorEngine extends EventEmitter {
 
         const preferredSource = token.pumpPortalTradeCount > 0 ? "pumpportal" : token.firstDetectedSource;
 
-        const hasRealAge = typeof token.tokenCreatedAt === "number";
+        const { source: chosenAgeSource, createdAt: evidenceCreatedAt } = this.deriveAgeEvidence(token);
+        const hasRealAge = typeof evidenceCreatedAt === "number";
         const qualitySignals = [
           token.priceUsd !== null,
           token.volumeUsd !== null,
@@ -369,7 +391,7 @@ class MonitorEngine extends EventEmitter {
         ].filter(Boolean).length;
         const dataQuality: TokenSnapshot["dataQuality"] = qualitySignals >= 4 ? "complete" : qualitySignals >= 2 ? "partial" : "low";
 
-        const realTokenAgeSeconds = hasRealAge ? Math.floor((now - (token.tokenCreatedAt as number)) / 1000) : null;
+        const realTokenAgeSeconds = hasRealAge ? Math.floor((now - (evidenceCreatedAt as number)) / 1000) : null;
         const seenByBotAgeSeconds = Math.floor((now - token.createdAt) / 1000);
         let freshness: TokenSnapshot["freshness"] = "unknown";
         if (realTokenAgeSeconds !== null) {
@@ -383,11 +405,15 @@ class MonitorEngine extends EventEmitter {
           freshness = "late";
         }
         const realAgeQuality: TokenSnapshot["realAgeQuality"] =
-          token.tokenAgeSource === "unknown" ? "unknown" : token.tokenAgeSource === "estimated" ? "estimated" : "exact";
+          chosenAgeSource === "unknown" ? "unknown" : chosenAgeSource === "estimated" ? "estimated" : "exact";
         const lifecycle: TokenSnapshot["lifecycle"] =
           token.parsedTradeCount >= 1 && hasRealAge ? "tradable" : token.parsedTradeCount >= 1 ? "enriched" : "discovered";
         token.lifecycle = lifecycle;
         const sniperReady = lifecycle === "tradable" && realTokenAgeSeconds !== null && realTokenAgeSeconds <= HARD_MAX_TOKEN_AGE_SECONDS;
+        if (realTokenAgeSeconds !== null && realTokenAgeSeconds > HARD_MAX_TOKEN_AGE_SECONDS && !this.staleAgeWarned.has(token.mintAddress)) {
+          this.staleAgeWarned.add(token.mintAddress);
+          this.log(`rejected as stale because of real age ${realTokenAgeSeconds}s source=${chosenAgeSource} ${token.mintAddress}`);
+        }
 
         return {
           mintAddress: token.mintAddress,
@@ -404,10 +430,13 @@ class MonitorEngine extends EventEmitter {
           name: token.name,
           firstSeenTimestamp: token.createdAt,
           tokenCreatedAt: token.tokenCreatedAt,
+          pairCreatedAt: token.pairCreatedAt,
+          firstTradeAt: token.firstTradeAt,
           createdAt: token.createdAt,
           ageSeconds: realTokenAgeSeconds,
           realTokenAgeSeconds,
           realAgeQuality,
+          ageSource: chosenAgeSource,
           seenByBotAgeSeconds,
           freshness,
           lastMetricUpdateAt: token.updatedAt,
@@ -643,6 +672,36 @@ class MonitorEngine extends EventEmitter {
     this.state.tradeHistory = this.state.tradeHistory.slice(0, 200);
   }
 
+  private deriveAgeEvidence(token: LiveTokenState): {
+    source: TokenSnapshot["ageSource"];
+    createdAt: number | null;
+  } {
+    const launchCreatedAt = token.tokenAgeSource === "launch" ? token.tokenCreatedAt : null;
+    const source: TokenSnapshot["ageSource"] =
+      launchCreatedAt !== null
+        ? "launch"
+        : token.pairCreatedAt !== null
+          ? "pair"
+          : token.firstTradeAt !== null
+            ? "first-trade"
+            : token.tokenCreatedAt !== null
+              ? token.tokenAgeSource
+              : "unknown";
+
+    const createdAt =
+      source === "launch"
+        ? launchCreatedAt
+        : source === "pair"
+          ? token.pairCreatedAt
+          : source === "first-trade"
+            ? token.firstTradeAt
+            : source === "on-chain" || source === "provider" || source === "estimated"
+              ? token.tokenCreatedAt
+              : null;
+
+    return { source, createdAt };
+  }
+
   private async enrichFromHeliusIfNeeded(mintAddress: string) {
     const token = this.store.all().find((entry) => entry.mintAddress === mintAddress);
     if (!token) return;
@@ -693,7 +752,7 @@ class MonitorEngine extends EventEmitter {
 
       if (Number.isFinite(earliestBlockTimeMs)) {
         token.tokenCreatedAt = token.tokenCreatedAt ? Math.min(token.tokenCreatedAt, earliestBlockTimeMs) : earliestBlockTimeMs;
-        token.tokenAgeSource = "chain";
+        token.tokenAgeSource = "on-chain";
       }
       if (parsedTrades > 0) {
         token.parsedTradeCount = parsedTrades;

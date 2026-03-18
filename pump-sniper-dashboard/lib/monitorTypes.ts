@@ -23,10 +23,13 @@ export interface TokenSnapshot {
   name: string;
   firstSeenTimestamp: number;
   tokenCreatedAt: number | null;
+  pairCreatedAt: number | null;
+  firstTradeAt: number | null;
   createdAt: number;
   ageSeconds: number | null;
   realTokenAgeSeconds: number | null;
   realAgeQuality: "exact" | "estimated" | "unknown";
+  ageSource: "launch" | "pair" | "first-trade" | "on-chain" | "provider" | "estimated" | "unknown";
   seenByBotAgeSeconds: number;
   freshness: "fresh" | "aging" | "late" | "unknown";
   lastMetricUpdateAt: number;

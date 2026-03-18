@@ -40,6 +40,7 @@ export function normalizePumpPortalPayload(payload: Record<string, unknown>, eve
   const tokenAmount = readNumber(payload, ["tokenAmount", "amountTokens", "tokensOut", "tokensIn"]);
   const solAmount = readNumber(payload, ["solAmount", "amountSol", "solIn", "solOut"]);
   const tokenCreatedAt = readTimestampMs(payload, ["tokenCreatedAt", "createdAt", "createdTimestamp", "mintedAt", "time"]);
+  const pairCreatedAt = readTimestampMs(payload, ["pairCreatedAt", "poolCreatedAt", "liquidityCreatedAt", "pairCreatedTimestamp"]);
 
   return {
     eventId: `${eventType}:${mintAddress}:${payload.signature ?? payload.timestamp ?? Date.now()}`,
@@ -50,6 +51,7 @@ export function normalizePumpPortalPayload(payload: Record<string, unknown>, eve
     name,
     timestamp: Date.now(),
     tokenCreatedAt,
+    pairCreatedAt,
     discoveryStatus: eventType === "migrated" ? "migrated" : eventType === "discovered" ? "discovered" : undefined,
     confirmationStatus: "unconfirmed",
     priceUsd,
