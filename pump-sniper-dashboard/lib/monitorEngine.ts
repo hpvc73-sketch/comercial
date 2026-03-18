@@ -1,14 +1,6 @@
 import { EventEmitter } from "node:events";
 import { canTradeByCooldown, computeRiskScore } from "./monitorMath";
-import {
-  MonitorSettings,
-  MonitorState,
-  Position,
-  RiskFactors,
-  TokenSnapshot,
-  TradeResult,
-  Signal,
-} from "./monitorTypes";
+import { MonitorSettings, MonitorState, Position, Signal, TokenSnapshot, TradeResult } from "./monitorTypes";
 
 const DEFAULT_SETTINGS: MonitorSettings = {
   paperBankrollUsd: 5000,
@@ -24,29 +16,35 @@ const DEFAULT_SETTINGS: MonitorSettings = {
     cooldownSeconds: 120,
     maxTradesPerHour: 8,
   },
-  realTrading: {
-    enabled: false,
-    autoExecute: false,
-    rpcUrl: "https://api.mainnet-beta.solana.com",
-    walletPrivateKey: "",
-    maxOrderUsd: 50,
-  },
 };
 
-const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+type TokenRuntime = {
+  token: TokenSnapshot;
+  buyTimestamps: number[];
+  knownWallets: Set<string>;
+  updatedAt: number;
+};
 
-function randomBase58(length: number): string {
-  return Array.from({ length }, () => BASE58[Math.floor(Math.random() * BASE58.length)]).join("");
+function safeNumber(value: unknown, fallback = 0): number {
+  const num = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num) ? num : fallback;
 }
 
-function generateMockMintAddress(): string {
-  // mock full mint format close to Pump.fun mints
-  return `${randomBase58(40)}pump`;
+function safeString(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function looksLikeMint(value: string): boolean {
+  return value.length >= 32 && value.length <= 64;
 }
 
 class MonitorEngine extends EventEmitter {
   private state: MonitorState;
-  private ticker?: NodeJS.Timeout;
+  private ws: WebSocket | null = null;
+  private reconnectTimer?: NodeJS.Timeout;
+  private heartbeatTimer?: NodeJS.Timeout;
+
+  private tokenRuntime = new Map<string, TokenRuntime>();
   private cooldownByMint = new Map<string, number>();
   private tradeTimestamps: number[] = [];
 
@@ -55,6 +53,8 @@ class MonitorEngine extends EventEmitter {
     this.state = {
       connected: false,
       lastEventAt: Date.now(),
+      dataMode: "unavailable",
+      dataWarning: "A ligar ao feed live de Pump.fun/Solana...",
       tokens: [],
       signals: [],
       positions: [],
@@ -66,11 +66,9 @@ class MonitorEngine extends EventEmitter {
         date: new Date().toISOString().slice(0, 10),
         totalSignals: 0,
         paperTrades: 0,
-        realTrades: 0,
         wins: 0,
         losses: 0,
         realizedPnlPaper: 0,
-        realizedPnlReal: 0,
       },
     };
   }
@@ -80,11 +78,8 @@ class MonitorEngine extends EventEmitter {
   }
 
   start() {
-    if (this.ticker) return;
-    this.state.connected = true;
-    this.log("Motor Pump monitor iniciado");
-    this.ticker = setInterval(() => this.tick(), 700);
-    this.ticker.unref();
+    if (this.ws) return;
+    this.connectLiveFeed();
   }
 
   updateSettings(next: Partial<MonitorSettings>) {
@@ -92,7 +87,6 @@ class MonitorEngine extends EventEmitter {
       ...this.state.settings,
       ...next,
       strategy: { ...this.state.settings.strategy, ...next.strategy },
-      realTrading: { ...this.state.settings.realTrading, ...next.realTrading },
     };
 
     if (typeof next.paperBankrollUsd === "number") {
@@ -100,16 +94,221 @@ class MonitorEngine extends EventEmitter {
     }
 
     this.log("Configuração atualizada");
-    this.emit("update", this.state);
+    this.emitUpdate();
   }
 
-  private tick() {
-    const token = this.generateToken();
-    this.state.tokens = [token, ...this.state.tokens].slice(0, 100);
-    this.evaluateSignal(token);
-    this.updatePositions(token);
+  private connectLiveFeed() {
+    try {
+      this.log("A ligar websocket live: wss://pumpportal.fun/api/data");
+      this.state.dataMode = "unavailable";
+      this.state.dataWarning = "A ligar ao feed live...";
+      this.emitUpdate();
+
+      this.ws = new WebSocket("wss://pumpportal.fun/api/data");
+
+      this.ws.addEventListener("open", () => {
+        this.state.connected = true;
+        this.state.dataMode = "live";
+        this.state.dataWarning = undefined;
+        this.log("Feed LIVE ligado.");
+
+        this.ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
+        this.ws?.send(JSON.stringify({ method: "subscribeMigration" }));
+
+        this.setupHeartbeat();
+        this.emitUpdate();
+      });
+
+      this.ws.addEventListener("message", (event) => {
+        const raw = typeof event.data === "string" ? event.data : "";
+        if (!raw) return;
+
+        let payload: Record<string, unknown>;
+        try {
+          payload = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          return;
+        }
+
+        this.processLivePayload(payload);
+      });
+
+      this.ws.addEventListener("close", () => {
+        this.log("Feed LIVE desligado, a tentar reconectar...");
+        this.state.connected = false;
+        this.state.dataMode = "unavailable";
+        this.state.dataWarning = "Sem ligação ao feed live. Nenhum token simulado será criado.";
+        this.cleanupConnection();
+        this.scheduleReconnect();
+        this.emitUpdate();
+      });
+
+      this.ws.addEventListener("error", () => {
+        this.log("Erro no websocket do feed LIVE.");
+      });
+    } catch (error) {
+      this.log(`Falha ao ligar feed live: ${(error as Error).message}`);
+      this.state.dataMode = "unavailable";
+      this.state.dataWarning = "Falha de ligação ao feed live. Nenhum token simulado será criado.";
+      this.scheduleReconnect();
+      this.emitUpdate();
+    }
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      this.connectLiveFeed();
+    }, 3000);
+    this.reconnectTimer.unref();
+  }
+
+  private setupHeartbeat() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+
+    this.heartbeatTimer = setInterval(() => {
+      const staleMs = Date.now() - this.state.lastEventAt;
+      if (staleMs > 20_000) {
+        this.state.dataWarning = "Feed live sem eventos recentes. A aguardar novos dados reais.";
+        this.emitUpdate();
+      }
+    }, 5000);
+    this.heartbeatTimer.unref();
+  }
+
+  private cleanupConnection() {
+    this.ws = null;
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+  }
+
+  private processLivePayload(payload: Record<string, unknown>) {
+    const mintAddress = this.extractMintAddress(payload);
+    if (!mintAddress) return;
+
+    const symbol = safeString(payload.symbol, safeString(payload.ticker, "UNKNOWN"));
+    const name = safeString(payload.name, symbol || "Unknown Token");
+    const txType = safeString(payload.txType, safeString(payload.type, ""));
+
+    const runtime = this.getOrCreateTokenRuntime(mintAddress, symbol, name, payload);
+
+    const solAmount = safeNumber(payload.solAmount, safeNumber(payload.sol_amount, 0));
+    const usdAmount = safeNumber(payload.usdAmount, solAmount * 170);
+    const tokenAmount = safeNumber(payload.tokenAmount, safeNumber(payload.token_amount, 0));
+    const wallet = safeString(payload.traderPublicKey, safeString(payload.user, safeString(payload.owner, "")));
+
+    runtime.token.symbol = symbol || runtime.token.symbol;
+    runtime.token.name = name || runtime.token.name;
+
+    // price fallback based on trade amounts; keep previous price if cannot infer.
+    if (solAmount > 0 && tokenAmount > 0) {
+      const price = usdAmount > 0 ? usdAmount / tokenAmount : (solAmount * 170) / tokenAmount;
+      if (Number.isFinite(price) && price > 0) runtime.token.price = Number(price.toFixed(8));
+    }
+
+    if (usdAmount > 0) runtime.token.volumeUsd = Number((runtime.token.volumeUsd + usdAmount).toFixed(2));
+
+    if (wallet) runtime.knownWallets.add(wallet);
+    runtime.token.uniqueWallets = Math.max(runtime.token.uniqueWallets, runtime.knownWallets.size);
+
+    if (txType.toLowerCase().includes("buy")) {
+      runtime.buyTimestamps.push(Date.now());
+    }
+
+    if (txType.toLowerCase().includes("sell")) {
+      runtime.token.dumpEvents += 1;
+    }
+
+    const cutoff = Date.now() - 10_000;
+    runtime.buyTimestamps = runtime.buyTimestamps.filter((ts) => ts >= cutoff);
+    runtime.token.buysPerSecond = Number((runtime.buyTimestamps.length / 10).toFixed(2));
+
+    runtime.token.ageSeconds = Math.max(0, Math.floor((Date.now() - runtime.token.createdAt) / 1000));
+    runtime.token.curveSlope = Number((runtime.token.buysPerSecond * 1.4 - runtime.token.dumpEvents * 0.8).toFixed(2));
+
+    runtime.token.riskFactors = {
+      buySpeed: Math.max(0, 100 - runtime.token.buysPerSecond * 12),
+      walletConcentration: Math.min(100, Math.max(10, 85 - runtime.token.uniqueWallets / 3)),
+      curveBehavior: Math.min(100, Math.max(0, 50 - runtime.token.curveSlope * 3)),
+      earlyVolume: Math.max(0, 100 - runtime.token.volumeUsd / 400),
+      earlyDumpSignals: Math.min(100, runtime.token.dumpEvents * 15),
+    };
+    runtime.token.riskScore = computeRiskScore(runtime.token.riskFactors);
+
+    runtime.updatedAt = Date.now();
+    this.tokenRuntime.set(mintAddress, runtime);
+
+    this.state.tokens = Array.from(this.tokenRuntime.values())
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((item) => item.token)
+      .slice(0, 120);
+
+    this.evaluateSignal(runtime.token);
+    this.updatePositions(runtime.token);
+
     this.state.lastEventAt = Date.now();
-    this.emit("update", this.state);
+    this.state.dataMode = "live";
+    this.state.dataWarning = undefined;
+    this.emitUpdate();
+  }
+
+  private getOrCreateTokenRuntime(
+    mintAddress: string,
+    symbol: string,
+    name: string,
+    payload: Record<string, unknown>,
+  ): TokenRuntime {
+    const existing = this.tokenRuntime.get(mintAddress);
+    if (existing) return existing;
+
+    const firstPrice = safeNumber(payload.priceUsd, safeNumber(payload.price, 0));
+    const now = Date.now();
+
+    const created: TokenRuntime = {
+      token: {
+        mintAddress,
+        symbol: symbol || "UNKNOWN",
+        name: name || symbol || "Unknown Token",
+        createdAt: now,
+        ageSeconds: 0,
+        price: firstPrice > 0 ? firstPrice : 0.000001,
+        volumeUsd: 0,
+        buysPerSecond: 0,
+        uniqueWallets: 0,
+        topWalletShare: 0,
+        curveSlope: 0,
+        dumpEvents: 0,
+        riskFactors: {
+          buySpeed: 50,
+          walletConcentration: 50,
+          curveBehavior: 50,
+          earlyVolume: 50,
+          earlyDumpSignals: 50,
+        },
+        riskScore: 50,
+      },
+      buyTimestamps: [],
+      knownWallets: new Set<string>(),
+      updatedAt: now,
+    };
+
+    return created;
+  }
+
+  private extractMintAddress(payload: Record<string, unknown>): string | null {
+    const candidates = [
+      safeString(payload.mint),
+      safeString(payload.mintAddress),
+      safeString(payload.tokenAddress),
+      safeString(payload.ca),
+      safeString(payload.address),
+    ];
+
+    const mint = candidates.find((candidate) => looksLikeMint(candidate));
+    return mint || null;
   }
 
   private evaluateSignal(token: TokenSnapshot) {
@@ -130,30 +329,24 @@ class MonitorEngine extends EventEmitter {
 
     if (!shouldBuy) return;
 
-    const reason = `buy/s ${token.buysPerSecond.toFixed(2)}, risco ${token.riskScore.toFixed(0)}, vol ${token.volumeUsd.toFixed(0)}`;
-
     const signal: Signal = {
       id: crypto.randomUUID(),
       mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
+      tokenName: token.name,
       side: "buy",
-      reason,
+      reason: `buy/s ${token.buysPerSecond.toFixed(2)}, risco ${token.riskScore.toFixed(0)}, vol ${token.volumeUsd.toFixed(0)}`,
       confidence: Math.max(1, 100 - token.riskScore),
       createdAt: Date.now(),
-      mode: "paper",
       buysPerSecond: token.buysPerSecond,
       riskScore: token.riskScore,
       volumeUsd: token.volumeUsd,
     };
 
-    this.state.signals = [signal, ...this.state.signals.filter((existing) => existing.id !== signal.id)].slice(0, 30);
+    this.state.signals = [signal, ...this.state.signals.filter((entry) => entry.id !== signal.id)].slice(0, 30);
     this.state.metrics.totalSignals += 1;
 
-    this.openPaperPosition(token, reason);
-
-    if (this.state.settings.realTrading.enabled && this.state.settings.realTrading.autoExecute) {
-      void this.executeRealBuy(token, reason);
-    }
+    this.openPaperPosition(token, signal.reason);
 
     this.cooldownByMint.set(token.mintAddress, Date.now());
     this.tradeTimestamps.push(Date.now());
@@ -166,15 +359,15 @@ class MonitorEngine extends EventEmitter {
       return;
     }
 
-    const quantity = size / token.price;
+    const quantity = size / Math.max(token.price, 0.0000001);
     const position: Position = {
       id: crypto.randomUUID(),
       mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
+      tokenName: token.name,
       entryPrice: token.price,
       quantity,
       entryAt: Date.now(),
-      mode: "paper",
       highestPrice: token.price,
       stopLoss: token.price * (1 - this.state.settings.strategy.stopLossPct / 100),
       takeProfit: token.price * (1 + this.state.settings.strategy.takeProfitPct / 100),
@@ -188,8 +381,8 @@ class MonitorEngine extends EventEmitter {
       id: crypto.randomUUID(),
       mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
+      tokenName: token.name,
       side: "buy",
-      mode: "paper",
       price: token.price,
       quantity,
       pnlUsd: 0,
@@ -211,16 +404,14 @@ class MonitorEngine extends EventEmitter {
         position.stopLoss = Math.max(position.stopLoss, trailing);
       }
 
-      if (token.price <= position.stopLoss || token.price >= position.takeProfit) {
-        toClose.push(position);
-      }
+      if (token.price <= position.stopLoss || token.price >= position.takeProfit) toClose.push(position);
     }
 
-    for (const position of toClose) this.closePosition(position, token);
+    toClose.forEach((position) => this.closePosition(position, token));
   }
 
   private closePosition(position: Position, token: TokenSnapshot) {
-    this.state.positions = this.state.positions.filter((p) => p.id !== position.id);
+    this.state.positions = this.state.positions.filter((entry) => entry.id !== position.id);
 
     const entry = position.entryPrice * position.quantity;
     const exit = token.price * position.quantity;
@@ -235,8 +426,8 @@ class MonitorEngine extends EventEmitter {
       id: crypto.randomUUID(),
       mintAddress: position.mintAddress,
       tokenSymbol: position.tokenSymbol,
+      tokenName: position.tokenName,
       side: "sell",
-      mode: position.mode,
       price: token.price,
       quantity: position.quantity,
       pnlUsd: pnl,
@@ -250,80 +441,13 @@ class MonitorEngine extends EventEmitter {
     this.state.tradeHistory = this.state.tradeHistory.slice(0, 200);
   }
 
-  private async executeRealBuy(token: TokenSnapshot, reason: string) {
-    const cfg = this.state.settings.realTrading;
-
-    if (!cfg.walletPrivateKey.trim()) {
-      this.log("Real trading ativo sem wallet configurada");
-      return;
-    }
-
-    try {
-      const dynamicImport = new Function("m", "return import(m)") as (m: string) => Promise<unknown>;
-      await dynamicImport("@pump-fun/sdk").catch(() => null);
-
-      const web3 = (await dynamicImport("@solana/web3.js").catch(() => null)) as
-        | { Keypair: { fromSecretKey: (k: Uint8Array) => { publicKey: { toBase58: () => string } } }; Connection: new (url: string, c: string) => { getLatestBlockhash: () => Promise<unknown> } }
-        | null;
-
-      let wallet = "wallet-indefinida";
-      if (web3) {
-        const secret = Uint8Array.from(JSON.parse(cfg.walletPrivateKey));
-        const keypair = web3.Keypair.fromSecretKey(secret);
-        const connection = new web3.Connection(cfg.rpcUrl, "confirmed");
-        await connection.getLatestBlockhash();
-        wallet = `${keypair.publicKey.toBase58().slice(0, 6)}...`;
-      }
-
-      this.recordTrade({
-        id: crypto.randomUUID(),
-        mintAddress: token.mintAddress,
-        tokenSymbol: token.symbol,
-        side: "buy",
-        mode: "real",
-        price: token.price,
-        quantity: cfg.maxOrderUsd / token.price,
-        pnlUsd: 0,
-        reason: `${reason} | wallet ${wallet}`,
-        timestamp: Date.now(),
-      });
-      this.state.metrics.realTrades += 1;
-      this.log(`Sinal REAL disparado para ${token.symbol}`);
-    } catch (error) {
-      this.log(`Erro em ordem real: ${(error as Error).message}`);
-    }
-  }
-
-  private generateToken(): TokenSnapshot {
-    const now = Date.now();
-    const factors: RiskFactors = {
-      buySpeed: Math.random() * 100,
-      walletConcentration: Math.random() * 100,
-      curveBehavior: Math.random() * 100,
-      earlyVolume: Math.random() * 100,
-      earlyDumpSignals: Math.random() * 100,
-    };
-
-    return {
-      mintAddress: generateMockMintAddress(),
-      symbol: `P${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
-      createdAt: now,
-      ageSeconds: Math.floor(Math.random() * 20),
-      price: Number((0.00003 + Math.random() * 0.002).toFixed(6)),
-      volumeUsd: Number((1000 + Math.random() * 50000).toFixed(2)),
-      buysPerSecond: Number((Math.random() * 8).toFixed(2)),
-      uniqueWallets: Math.floor(20 + Math.random() * 250),
-      topWalletShare: Number((10 + Math.random() * 60).toFixed(2)),
-      curveSlope: Number((-6 + Math.random() * 12).toFixed(2)),
-      dumpEvents: Math.floor(Math.random() * 8),
-      riskFactors: factors,
-      riskScore: computeRiskScore(factors),
-    };
-  }
-
-  private log(msg: string) {
-    this.state.logs.unshift(`[${new Date().toLocaleTimeString("pt-PT")}] ${msg}`);
+  private log(message: string) {
+    this.state.logs.unshift(`[${new Date().toLocaleTimeString("pt-PT")}] ${message}`);
     this.state.logs = this.state.logs.slice(0, 200);
+  }
+
+  private emitUpdate() {
+    this.emit("update", this.state);
   }
 }
 

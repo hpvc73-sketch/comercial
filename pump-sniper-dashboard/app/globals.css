@@ -8,23 +8,15 @@ a:hover { color: #bfdbfe; text-decoration: underline; }
 .token-link { color: #e2e8f0; }
 .token-link:hover { color: #a5f3fc; }
 
-.mint-link {
-  color: #94a3b8;
-  word-break: break-all;
-}
+.mint-link { color: #94a3b8; word-break: break-all; }
 
-.signal-item {
-  border: 1px solid #334155;
-  border-radius: 8px;
-  padding: 8px;
-  background: #111827;
-}
+.signal-item { border: 1px solid #334155; border-radius: 8px; padding: 8px; background: #111827; }
+.signal-fresh { animation: signalFlash 2.8s ease; border-color: #22d3ee; box-shadow: 0 0 0 1px #22d3ee33; }
 
-.signal-fresh {
-  animation: signalFlash 2.8s ease;
-  border-color: #22d3ee;
-  box-shadow: 0 0 0 1px #22d3ee33;
-}
+.mode-badge { border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 700; }
+.mode-badge.live { background: #166534; color: #dcfce7; }
+.mode-badge.warn { background: #78350f; color: #fef3c7; }
+.warning-box { border: 1px solid #f59e0b; background: #451a03; color: #fde68a; padding: 8px 10px; border-radius: 8px; }
 
 @keyframes signalFlash {
   from { background: #164e63; }

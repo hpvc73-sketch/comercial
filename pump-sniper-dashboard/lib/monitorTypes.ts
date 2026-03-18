@@ -1,5 +1,3 @@
-export type TradingMode = "paper" | "real";
-
 export interface RiskFactors {
   buySpeed: number;
   walletConcentration: number;
@@ -11,6 +9,7 @@ export interface RiskFactors {
 export interface TokenSnapshot {
   mintAddress: string;
   symbol: string;
+  name: string;
   createdAt: number;
   ageSeconds: number;
   price: number;
@@ -28,11 +27,11 @@ export interface Signal {
   id: string;
   mintAddress: string;
   tokenSymbol: string;
+  tokenName: string;
   side: "buy" | "sell";
   reason: string;
   confidence: number;
   createdAt: number;
-  mode: TradingMode;
   buysPerSecond: number;
   riskScore: number;
   volumeUsd: number;
@@ -42,10 +41,10 @@ export interface Position {
   id: string;
   mintAddress: string;
   tokenSymbol: string;
+  tokenName: string;
   entryPrice: number;
   quantity: number;
   entryAt: number;
-  mode: TradingMode;
   highestPrice: number;
   stopLoss: number;
   takeProfit: number;
@@ -56,8 +55,8 @@ export interface TradeResult {
   id: string;
   mintAddress: string;
   tokenSymbol: string;
+  tokenName: string;
   side: "buy" | "sell";
-  mode: TradingMode;
   price: number;
   quantity: number;
   pnlUsd: number;
@@ -69,11 +68,9 @@ export interface DailyMetrics {
   date: string;
   totalSignals: number;
   paperTrades: number;
-  realTrades: number;
   wins: number;
   losses: number;
   realizedPnlPaper: number;
-  realizedPnlReal: number;
 }
 
 export interface StrategyConfig {
@@ -89,23 +86,18 @@ export interface StrategyConfig {
   maxTradesPerHour: number;
 }
 
-export interface RealTradingConfig {
-  enabled: boolean;
-  autoExecute: boolean;
-  rpcUrl: string;
-  walletPrivateKey: string;
-  maxOrderUsd: number;
-}
-
 export interface MonitorSettings {
   paperBankrollUsd: number;
   strategy: StrategyConfig;
-  realTrading: RealTradingConfig;
 }
+
+export type DataMode = "live" | "mock" | "unavailable";
 
 export interface MonitorState {
   connected: boolean;
   lastEventAt: number;
+  dataMode: DataMode;
+  dataWarning?: string;
   tokens: TokenSnapshot[];
   signals: Signal[];
   positions: Position[];

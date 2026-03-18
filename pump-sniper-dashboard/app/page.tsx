@@ -34,13 +34,10 @@ export default function HomePage() {
       const dedupSignals = Array.from(new Map(incoming.signals.map((signal) => [signal.id, signal])).values()).slice(0, 30);
       const normalized = { ...incoming, signals: dedupSignals };
 
-      const newIds = dedupSignals
-        .filter((signal) => !seenSignalIds.current.has(signal.id))
-        .map((signal) => signal.id);
-
+      const newIds = dedupSignals.filter((signal) => !seenSignalIds.current.has(signal.id)).map((signal) => signal.id);
       dedupSignals.forEach((signal) => seenSignalIds.current.add(signal.id));
-      setState(normalized);
 
+      setState(normalized);
       if (newIds.length > 0) {
         setFreshSignalIds((prev) => {
           const next = new Set(prev);
@@ -79,7 +76,7 @@ export default function HomePage() {
             const snapshot = await fetchState();
             applyState(snapshot);
           } catch {
-            // continue
+            // keep trying
           }
         }, 900);
       }
@@ -117,31 +114,28 @@ export default function HomePage() {
           minBuysPerSecond: Number(fd.get("minBuysPerSecond")),
           minVolumeUsd: Number(fd.get("minVolumeUsd")),
         },
-        realTrading: {
-          enabled: fd.get("realEnabled") === "on",
-          autoExecute: fd.get("realAuto") === "on",
-          rpcUrl: String(fd.get("rpcUrl")),
-          walletPrivateKey: String(fd.get("walletPrivateKey")),
-          maxOrderUsd: Number(fd.get("maxOrderUsd")),
-        },
       }),
     });
   }
 
-  if (!state) {
-    return <main style={{ padding: 24 }}>A ligar ao motor de monitorização...</main>;
-  }
+  if (!state) return <main style={{ padding: 24 }}>A ligar ao motor de monitorização...</main>;
+
+  const dataBadge = state.dataMode === "live" ? "LIVE REAL DATA" : state.dataMode === "mock" ? "MOCK / DEMO DATA" : "LIVE DATA OFFLINE";
 
   return (
     <main style={{ padding: 24, maxWidth: 1380, margin: "0 auto", color: "#e2e8f0" }}>
-      <h1 style={{ marginBottom: 8 }}>Pump Sniper Dashboard</h1>
-      <p style={{ opacity: 0.85, marginTop: 0 }}>Status: {status === "connected" ? "Tempo real (SSE)" : "Fallback polling rápido"}</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+        <h1 style={{ marginBottom: 8 }}>Pump Sniper Dashboard</h1>
+        <div className={state.dataMode === "live" ? "mode-badge live" : "mode-badge warn"}>{dataBadge}</div>
+      </div>
+      <p style={{ opacity: 0.85, marginTop: 0 }}>Status stream: {status === "connected" ? "SSE live" : "Fallback polling"}</p>
+      {state.dataWarning ? <p className="warning-box">⚠ {state.dataWarning}</p> : null}
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12, marginBottom: 18 }}>
         <Card label="Saldo virtual" value={fmtUsd(state.balances.paperUsd)} />
         <Card label="PnL paper diário" value={fmtUsd(state.metrics.realizedPnlPaper)} />
         <Card label="Sinais diários" value={String(state.metrics.totalSignals)} />
-        <Card label="Trades reais diários" value={String(state.metrics.realTrades)} />
+        <Card label="Trades paper diários" value={String(state.metrics.paperTrades)} />
       </section>
 
       <form onSubmit={saveSettings} style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 10, marginBottom: 14 }}>
@@ -155,13 +149,6 @@ export default function HomePage() {
         <Input name="maxTradesPerHour" label="Trades / hora" defaultValue={state.settings.strategy.maxTradesPerHour} />
         <Input name="minBuysPerSecond" label="Min buys/s" defaultValue={state.settings.strategy.minBuysPerSecond} />
         <Input name="minVolumeUsd" label="Volume mínimo" defaultValue={state.settings.strategy.minVolumeUsd} />
-
-        <Input name="rpcUrl" label="RPC URL" defaultValue={state.settings.realTrading.rpcUrl} />
-        <Input name="walletPrivateKey" label="Wallet key JSON" defaultValue={state.settings.realTrading.walletPrivateKey} />
-        <Input name="maxOrderUsd" label="Ordem real máx $" defaultValue={state.settings.realTrading.maxOrderUsd} />
-
-        <label><input type="checkbox" name="realEnabled" defaultChecked={state.settings.realTrading.enabled} /> Ativar real</label>
-        <label><input type="checkbox" name="realAuto" defaultChecked={state.settings.realTrading.autoExecute} /> Auto real</label>
         <button type="submit">Guardar</button>
       </form>
 
@@ -183,15 +170,13 @@ export default function HomePage() {
           </tr>
         </thead>
         <tbody>
-          {filteredTokens.map((token) => (
-            <TokenRow key={token.mintAddress} token={token} />
-          ))}
+          {filteredTokens.map((token) => <TokenRow key={token.mintAddress} token={token} />)}
         </tbody>
       </table>
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 12 }}>
         <SignalsPanel signals={state.signals.slice(0, 30)} freshSignalIds={freshSignalIds} />
-        <Panel title="Trades" items={state.tradeHistory.slice(0, 20).map((trade) => `${trade.mode.toUpperCase()} ${trade.side.toUpperCase()} ${trade.tokenSymbol} PnL ${fmtUsd(trade.pnlUsd)}`)} />
+        <Panel title="Trades" items={state.tradeHistory.slice(0, 20).map((trade) => `${trade.side.toUpperCase()} ${trade.tokenSymbol} (${trade.tokenName}) PnL ${fmtUsd(trade.pnlUsd)}`)} />
         <Panel title="Logs" items={state.logs.slice(0, 20)} />
       </section>
     </main>
@@ -203,15 +188,13 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
     <tr style={{ borderTop: "1px solid #1e293b" }}>
       <td>
         <a className="token-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
-          <strong>{token.symbol}</strong>
+          <strong>{token.symbol}</strong> <span style={{ opacity: 0.8 }}>({token.name})</span>
         </a>
         <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>
-          <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
-            {token.mintAddress}
-          </a>
+          <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">{token.mintAddress}</a>
         </div>
       </td>
-      <td>{token.price.toFixed(6)}</td>
+      <td>{token.price.toFixed(8)}</td>
       <td>{fmtUsd(token.volumeUsd)}</td>
       <td>{token.buysPerSecond.toFixed(2)}</td>
       <td>{token.uniqueWallets}</td>
@@ -224,7 +207,7 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
 function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {
   return (
     <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, background: "#0f172a" }}>
-      <h3 style={{ marginTop: 0 }}>Sinais (tempo quase real)</h3>
+      <h3 style={{ marginTop: 0 }}>Sinais (real tokens only)</h3>
       <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
         {signals.map((signal) => {
           const isFresh = freshSignalIds.has(signal.id);
@@ -232,7 +215,7 @@ function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSig
             <li key={signal.id} className={isFresh ? "signal-item signal-fresh" : "signal-item"}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
                 <a className="token-link" href={phantomLink(signal.mintAddress)} target="_blank" rel="noreferrer">
-                  <strong>{signal.tokenSymbol}</strong>
+                  <strong>{signal.tokenSymbol}</strong> <span style={{ opacity: 0.8 }}>({signal.tokenName})</span>
                 </a>
                 <span style={{ opacity: 0.8 }}>{new Date(signal.createdAt).toLocaleTimeString("pt-PT")}</span>
               </div>
@@ -272,11 +255,7 @@ function Panel({ title, items }: { title: string; items: string[] }) {
   return (
     <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, background: "#0f172a" }}>
       <h3>{title}</h3>
-      <ul>
-        {items.map((item, idx) => (
-          <li key={`${item}-${idx}`}>{item}</li>
-        ))}
-      </ul>
+      <ul>{items.map((item, idx) => <li key={`${item}-${idx}`}>{item}</li>)}</ul>
     </div>
   );
 }
