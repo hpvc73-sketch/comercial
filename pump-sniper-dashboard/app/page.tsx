@@ -202,8 +202,8 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{token.uniqueWallets}</td>
       <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
       <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
-      <td><span className="badge-source">{token.source}</span></td>
-      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.discoveryStatus} · {token.confirmationStatus}</span></td>
+      <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
+      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.discoveryStatus} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
     </tr>
   );
 }

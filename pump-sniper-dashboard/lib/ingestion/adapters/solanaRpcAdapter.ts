@@ -1,6 +1,6 @@
 import { SourceAdapter, SourceHealth, UnifiedTokenEvent } from "../types";
 
-type PendingSub = { mintAddress: string; requestId: number };
+const BASE58_RE = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
 
 export class SolanaRpcAdapter implements SourceAdapter {
   readonly source = "solana-rpc" as const;
@@ -9,15 +9,13 @@ export class SolanaRpcAdapter implements SourceAdapter {
   private lastEventAt?: number;
   private warning?: string;
   private requestId = 1;
-  private pendingByRequest = new Map<number, PendingSub>();
-  private mintBySubscription = new Map<number, string>();
   private reconnectTimer?: NodeJS.Timeout;
 
-  constructor(private wsEndpoint: string) {}
+  constructor(private wsEndpoint: string | undefined, private pumpProgramId: string) {}
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
     if (this.ws || !this.wsEndpoint) {
-      if (!this.wsEndpoint) this.warning = "SOLANA_RPC_WS_URL não configurado";
+      if (!this.wsEndpoint) this.warning = "SOLANA_RPC_WS_URL não configurado (obrigatório).";
       return;
     }
 
@@ -26,6 +24,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
     this.ws.addEventListener("open", () => {
       this.connected = true;
       this.warning = undefined;
+      this.subscribeLogs();
       onEvent({ eventId: `health:${Date.now()}:solana`, source: this.source, eventType: "health", timestamp: Date.now() });
     });
 
@@ -40,37 +39,57 @@ export class SolanaRpcAdapter implements SourceAdapter {
         return;
       }
 
-      const id = typeof payload.id === "number" ? payload.id : undefined;
-      const result = payload.result;
-
-      if (id !== undefined && typeof result === "number") {
-        const pending = this.pendingByRequest.get(id);
-        if (pending) {
-          this.pendingByRequest.delete(id);
-          this.mintBySubscription.set(result, pending.mintAddress);
-        }
-        return;
-      }
-
       const method = typeof payload.method === "string" ? payload.method : "";
-      if (method !== "accountNotification") return;
+      if (method !== "logsNotification") return;
 
-      const params = payload.params as { subscription?: number } | undefined;
-      const subId = params?.subscription;
-      if (!subId) return;
+      const logs =
+        ((payload.params as { result?: { value?: { logs?: string[] } } } | undefined)?.result?.value?.logs as string[] | undefined) ??
+        [];
 
-      const mintAddress = this.mintBySubscription.get(subId);
-      if (!mintAddress) return;
+      const detectedMints = this.extractMintCandidates(logs);
+      if (detectedMints.length === 0) return;
 
       this.lastEventAt = Date.now();
-      onEvent({
-        eventId: `confirmed:${mintAddress}:${Date.now()}`,
-        source: this.source,
-        eventType: "confirmed",
-        mintAddress,
-        timestamp: Date.now(),
-        confirmationStatus: "confirmed",
-      });
+      const lowerLogs = logs.join(" ").toLowerCase();
+
+      for (const mintAddress of detectedMints) {
+        const isCreate = lowerLogs.includes("initialize") || lowerLogs.includes("create") || lowerLogs.includes("mint");
+        const isBuy = lowerLogs.includes("buy");
+        const isLiquidity = lowerLogs.includes("liquidity") || lowerLogs.includes("add_liquidity");
+
+        onEvent({
+          eventId: `solana-discovered:${mintAddress}:${Date.now()}`,
+          source: this.source,
+          eventType: isCreate ? "discovered" : "trade",
+          mintAddress,
+          timestamp: Date.now(),
+          discoveryStatus: "discovered",
+          confirmationStatus: "confirmed",
+          buysDelta: isBuy ? 1 : 0,
+          sellsDelta: lowerLogs.includes("sell") ? 1 : 0,
+        });
+
+        onEvent({
+          eventId: `solana-confirmed:${mintAddress}:${Date.now()}`,
+          source: this.source,
+          eventType: "confirmed",
+          mintAddress,
+          timestamp: Date.now(),
+          confirmationStatus: "confirmed",
+        });
+
+        if (isLiquidity) {
+          onEvent({
+            eventId: `solana-liquidity:${mintAddress}:${Date.now()}`,
+            source: this.source,
+            eventType: "liquidity",
+            mintAddress,
+            timestamp: Date.now(),
+            discoveryStatus: "migrated",
+            confirmationStatus: "confirmed",
+          });
+        }
+      }
     });
 
     this.ws.addEventListener("close", () => {
@@ -83,22 +102,6 @@ export class SolanaRpcAdapter implements SourceAdapter {
     this.ws.addEventListener("error", () => {
       this.warning = "Erro no websocket Solana RPC";
     });
-  }
-
-  registerMint(mintAddress: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    const id = this.requestId++;
-    this.pendingByRequest.set(id, { mintAddress, requestId: id });
-
-    this.ws.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id,
-        method: "accountSubscribe",
-        params: [mintAddress, { encoding: "jsonParsed", commitment: "confirmed" }],
-      }),
-    );
   }
 
   stop(): void {
@@ -116,12 +119,37 @@ export class SolanaRpcAdapter implements SourceAdapter {
     };
   }
 
+  private subscribeLogs() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const id = this.requestId++;
+    this.ws.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "logsSubscribe",
+        params: [{ mentions: [this.pumpProgramId] }, { commitment: "confirmed" }],
+      }),
+    );
+  }
+
+  private extractMintCandidates(logs: string[]): string[] {
+    const values = new Set<string>();
+    for (const log of logs) {
+      const matches = log.match(BASE58_RE);
+      if (!matches) continue;
+      for (const candidate of matches) {
+        if (candidate.length >= 32 && candidate.length <= 44) values.add(candidate);
+      }
+    }
+    return Array.from(values);
+  }
+
   private scheduleReconnect(onEvent: (event: UnifiedTokenEvent) => void) {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       this.start(onEvent);
-    }, 3000);
+    }, 2500);
     this.reconnectTimer.unref();
   }
 }

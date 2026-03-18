@@ -5,7 +5,7 @@ export type ConfirmationStatus = "unconfirmed" | "confirmed";
 export interface UnifiedTokenEvent {
   eventId: string;
   source: DataSource;
-  eventType: "discovered" | "trade" | "migrated" | "confirmed" | "health";
+  eventType: "discovered" | "trade" | "liquidity" | "migrated" | "confirmed" | "health";
   mintAddress?: string;
   symbol?: string;
   name?: string;

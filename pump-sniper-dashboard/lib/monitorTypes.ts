@@ -9,6 +9,8 @@ export interface RiskFactors {
 export interface TokenSnapshot {
   mintAddress: string;
   source: "pumpportal" | "solana-rpc" | "helius-grpc";
+  firstDetectedSource: "pumpportal" | "solana-rpc" | "helius-grpc";
+  sourceLatencyMs: Record<string, number>;
   discoveryStatus: "discovered" | "migrated" | "stale";
   confirmationStatus: "unconfirmed" | "confirmed";
   symbol: string;

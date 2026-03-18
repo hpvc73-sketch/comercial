@@ -16,6 +16,9 @@ export interface LiveTokenState {
   traders: Set<string>;
   traderVolumeUsd: Map<string, number>;
   buyTimestamps: number[];
+  detectedAtBySource: Map<DataSource, number>;
+  firstDetectedSource: DataSource;
+  firstDetectedAt: number;
 }
 
 export class LiveStateStore {
@@ -41,6 +44,9 @@ export class LiveStateStore {
       traders: new Set<string>(),
       traderVolumeUsd: new Map<string, number>(),
       buyTimestamps: [],
+      detectedAtBySource: new Map<DataSource, number>([[defaults.source, defaults.timestamp]]),
+      firstDetectedSource: defaults.source,
+      firstDetectedAt: defaults.timestamp,
     };
 
     this.tokens.set(mintAddress, token);

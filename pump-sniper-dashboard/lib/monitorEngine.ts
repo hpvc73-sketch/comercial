@@ -71,12 +71,15 @@ class MonitorEngine extends EventEmitter {
   start() {
     if (this.adapters.length > 0) return;
 
-    const solanaWs = process.env.SOLANA_RPC_WS_URL ?? "wss://api.mainnet-beta.solana.com";
-    const heliusWs = process.env.HELIUS_GRPC_WS_URL;
+    const solanaWs = process.env.SOLANA_RPC_WS_URL;
+    const heliusWs =
+      process.env.HELIUS_GRPC_WS_URL ??
+      (process.env.HELIUS_API_KEY ? `wss://atlas-mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : undefined);
+    const pumpProgramId = process.env.PUMPFUN_PROGRAM_ID ?? "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
     const pumpPortal = new PumpPortalAdapter();
-    const solanaRpc = new SolanaRpcAdapter(solanaWs);
-    const helius = new HeliusGrpcAdapter(heliusWs);
+    const solanaRpc = new SolanaRpcAdapter(solanaWs, pumpProgramId);
+    const helius = new HeliusGrpcAdapter(heliusWs, pumpProgramId);
 
     this.adapters = [pumpPortal, solanaRpc, helius];
     this.adapters.forEach((adapter) => adapter.start((event) => this.onUnifiedEvent(event)));
@@ -128,6 +131,25 @@ class MonitorEngine extends EventEmitter {
     if (event.name) token.name = event.name;
     token.source = event.source;
 
+    const existingDetectedAt = token.detectedAtBySource.get(event.source);
+    if (!existingDetectedAt) token.detectedAtBySource.set(event.source, event.timestamp);
+
+    if (event.timestamp < token.firstDetectedAt) {
+      token.firstDetectedAt = event.timestamp;
+      token.firstDetectedSource = event.source;
+    }
+
+    if (event.source === "pumpportal" && event.eventType === "discovered") {
+      this.log(`token detected via pumpportal: ${token.symbol} ${token.mintAddress}`);
+    }
+    if (event.source === "solana-rpc" && event.eventType === "confirmed") {
+      this.log(`token confirmed via solana logs: ${token.symbol} ${token.mintAddress}`);
+      const pumpSeen = token.detectedAtBySource.get("pumpportal");
+      const solSeen = token.detectedAtBySource.get("solana-rpc");
+      if (pumpSeen && solSeen) {
+        this.log(`latency difference (solana-rpc - pumpportal): ${solSeen - pumpSeen}ms for ${token.mintAddress}`);
+      }
+    }
     if (event.discoveryStatus) token.discoveryStatus = event.discoveryStatus;
     if (event.eventType === "migrated") token.discoveryStatus = "migrated";
 
@@ -148,11 +170,6 @@ class MonitorEngine extends EventEmitter {
 
     const cutoff = Date.now() - 10_000;
     token.buyTimestamps = token.buyTimestamps.filter((ts) => ts >= cutoff);
-
-    // Register on-chain confirmation watchers for discovered tokens.
-    if (token.confirmationStatus !== "confirmed") {
-      this.adapters.forEach((adapter) => adapter.registerMint?.(token.mintAddress));
-    }
 
     this.refreshStateFromStore();
 
@@ -197,9 +214,18 @@ class MonitorEngine extends EventEmitter {
 
         const riskScore = riskFactors ? computeRiskScore(riskFactors) : null;
 
+        const sourceLatencyMs: Record<string, number> = {};
+        for (const [source, ts] of token.detectedAtBySource.entries()) {
+          sourceLatencyMs[source] = ts - token.firstDetectedAt;
+        }
+
+        const preferredSource = token.firstDetectedSource;
+
         return {
           mintAddress: token.mintAddress,
-          source: token.source,
+          source: preferredSource,
+          firstDetectedSource: token.firstDetectedSource,
+          sourceLatencyMs,
           discoveryStatus: token.discoveryStatus,
           confirmationStatus: token.confirmationStatus,
           symbol: token.symbol,
@@ -263,6 +289,7 @@ class MonitorEngine extends EventEmitter {
       token.buysPerSecond >= strategy.minBuysPerSecond &&
       token.riskScore !== null &&
       token.riskScore <= strategy.maxRiskScore &&
+      token.confirmationStatus === "confirmed" &&
       token.volumeUsd >= strategy.minVolumeUsd &&
       !isCooldown &&
       this.tradeTimestamps.length < strategy.maxTradesPerHour;

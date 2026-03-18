@@ -1,14 +1,14 @@
 import { SourceAdapter, SourceHealth, UnifiedTokenEvent } from "../types";
 import { SolanaRpcAdapter } from "./solanaRpcAdapter";
 
-// Optional premium adapter placeholder: if HELIUS_GRPC_WS_URL exists,
-// we consume it using websocket-compatible account subscriptions.
+// Optional premium adapter placeholder: if HELIUS endpoint exists,
+// consume it via websocket logs subscription (same schema as RPC logsSubscribe).
 export class HeliusGrpcAdapter implements SourceAdapter {
   readonly source = "helius-grpc" as const;
   private delegate?: SolanaRpcAdapter;
 
-  constructor(private wsEndpoint?: string) {
-    if (wsEndpoint) this.delegate = new SolanaRpcAdapter(wsEndpoint);
+  constructor(private wsEndpoint: string | undefined, private pumpProgramId: string) {
+    if (wsEndpoint) this.delegate = new SolanaRpcAdapter(wsEndpoint, pumpProgramId);
   }
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
@@ -19,16 +19,12 @@ export class HeliusGrpcAdapter implements SourceAdapter {
     this.delegate?.stop();
   }
 
-  registerMint(mintAddress: string): void {
-    this.delegate?.registerMint(mintAddress);
-  }
-
   getHealth(): SourceHealth {
     if (!this.delegate) {
       return {
         source: this.source,
         connected: false,
-        warning: "HELIUS_GRPC_WS_URL não configurado",
+        warning: "HELIUS_GRPC_WS_URL/HELIUS_API_KEY não configurado",
       };
     }
 
