@@ -188,6 +188,7 @@ class MonitorEngine extends EventEmitter {
       priceUsd: event.priceUsd,
       volumeUsd: event.volumeUsd,
     });
+    this.adapters.forEach((adapter) => adapter.registerMint?.(event.mintAddress as string));
 
     token.updatedAt = event.timestamp;
     if (event.symbol) token.symbol = event.symbol;
@@ -220,23 +221,28 @@ class MonitorEngine extends EventEmitter {
 
     const tradeUsd = event.tradeUsd ?? event.volumeUsd;
     const tradeSide = event.tradeSide ?? (event.buysDelta ? "buy" : event.sellsDelta ? "sell" : undefined);
+    const isPumpPortalTrade = event.source === "pumpportal" && event.eventType === "trade";
+    const canUseSecondary = token.pumpPortalTradeCount === 0;
 
-    if (event.priceUsd && event.priceUsd > 0) {
+    if (isPumpPortalTrade) token.pumpPortalTradeCount += 1;
+
+    const shouldApplyMetrics = isPumpPortalTrade || canUseSecondary;
+    if (shouldApplyMetrics && event.priceUsd && event.priceUsd > 0) {
       token.priceUsd = event.priceUsd;
       this.log(`price updated ${token.symbol} ${token.mintAddress}: ${event.priceUsd.toFixed(8)}`);
     }
-    if (typeof tradeUsd === "number" && tradeUsd > 0) {
+    if (shouldApplyMetrics && typeof tradeUsd === "number" && tradeUsd > 0) {
       token.volumeUsd = (token.volumeUsd ?? 0) + tradeUsd;
       this.log(`volume updated ${token.symbol} ${token.mintAddress}: ${token.volumeUsd.toFixed(2)} USD`);
     }
-    if (event.buysDelta) {
+    if (shouldApplyMetrics && event.buysDelta) {
       token.buys += event.buysDelta;
       token.buyTimestamps.push(event.timestamp);
       this.log(`buy detected ${token.symbol} ${token.mintAddress}`);
     }
-    if (event.sellsDelta) token.sells += event.sellsDelta;
-    if (event.sellsDelta) token.sellTimestamps.push(event.timestamp);
-    if (event.trader) {
+    if (shouldApplyMetrics && event.sellsDelta) token.sells += event.sellsDelta;
+    if (shouldApplyMetrics && event.sellsDelta) token.sellTimestamps.push(event.timestamp);
+    if (shouldApplyMetrics && event.trader) {
       token.traders.add(event.trader);
       if (tradeSide === "buy") {
         const preSize = token.buyerWallets.size;
@@ -249,7 +255,7 @@ class MonitorEngine extends EventEmitter {
       token.traderVolumeUsd.set(event.trader, current + (tradeUsd ?? 0));
     }
 
-    if (tradeSide && (typeof tradeUsd === "number" || event.priceUsd || event.tradeTokenAmount || event.tradeSolAmount)) {
+    if (shouldApplyMetrics && tradeSide && (typeof tradeUsd === "number" || event.priceUsd || event.tradeTokenAmount || event.tradeSolAmount)) {
       token.recentTrades.push({
         timestamp: event.timestamp,
         side: tradeSide,
@@ -285,6 +291,7 @@ class MonitorEngine extends EventEmitter {
   private refreshStateFromStore() {
     const tokens = this.store
       .all()
+      .filter((token) => token.pumpPortalTradeCount > 0)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 120)
       .map<TokenSnapshot>((token) => {
@@ -321,7 +328,7 @@ class MonitorEngine extends EventEmitter {
           sourceLatencyMs[source] = ts - token.firstDetectedAt;
         }
 
-        const preferredSource = token.firstDetectedSource;
+        const preferredSource = token.pumpPortalTradeCount > 0 ? "pumpportal" : token.firstDetectedSource;
 
         const qualitySignals = [
           token.priceUsd !== null,

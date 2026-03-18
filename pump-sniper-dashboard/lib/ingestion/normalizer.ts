@@ -41,7 +41,7 @@ export function normalizePumpPortalPayload(payload: Record<string, unknown>, eve
     symbol,
     name,
     timestamp: Date.now(),
-    discoveryStatus: eventType === "migrated" ? "migrated" : "discovered",
+    discoveryStatus: eventType === "migrated" ? "migrated" : eventType === "discovered" ? "discovered" : undefined,
     confirmationStatus: "unconfirmed",
     priceUsd,
     volumeUsd: usdAmount,

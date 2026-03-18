@@ -27,6 +27,7 @@ export interface LiveTokenState {
     tokenAmount?: number;
     solAmount?: number;
   }>;
+  pumpPortalTradeCount: number;
   detectedAtBySource: Map<DataSource, number>;
   firstDetectedSource: DataSource;
   firstDetectedAt: number;
@@ -58,6 +59,7 @@ export class LiveStateStore {
       buyTimestamps: [],
       sellTimestamps: [],
       recentTrades: [],
+      pumpPortalTradeCount: 0,
       detectedAtBySource: new Map<DataSource, number>([[defaults.source, defaults.timestamp]]),
       firstDetectedSource: defaults.source,
       firstDetectedAt: defaults.timestamp,

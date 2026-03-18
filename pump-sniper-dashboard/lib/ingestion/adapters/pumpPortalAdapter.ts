@@ -8,6 +8,7 @@ export class PumpPortalAdapter implements SourceAdapter {
   private lastEventAt?: number;
   private warning?: string;
   private reconnectTimer?: NodeJS.Timeout;
+  private subscribedMints = new Set<string>();
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
     if (this.ws) return;
@@ -18,6 +19,9 @@ export class PumpPortalAdapter implements SourceAdapter {
       this.warning = undefined;
       this.ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
       this.ws?.send(JSON.stringify({ method: "subscribeMigration" }));
+      for (const mint of this.subscribedMints) {
+        this.ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+      }
       onEvent({ eventId: `health:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now() });
     });
 
@@ -32,16 +36,17 @@ export class PumpPortalAdapter implements SourceAdapter {
       }
 
       const txType = typeof payload.txType === "string" ? payload.txType.toLowerCase() : "";
-      const normalized = normalizePumpPortalPayload(payload, txType.includes("migr") ? "migrated" : "discovered");
-      if (!normalized) return;
+      const eventType: UnifiedTokenEvent["eventType"] = txType.includes("migr")
+        ? "migrated"
+        : txType.includes("buy") || txType.includes("sell")
+          ? "trade"
+          : "discovered";
+      const normalized = normalizePumpPortalPayload(payload, eventType);
+      if (!normalized || !normalized.mintAddress) return;
 
       this.lastEventAt = Date.now();
       onEvent(normalized);
-
-      const tradeEvent = normalizePumpPortalPayload(payload, "trade");
-      if (tradeEvent && (tradeEvent.buysDelta || tradeEvent.sellsDelta || tradeEvent.volumeUsd)) {
-        onEvent({ ...tradeEvent, eventId: `${tradeEvent.eventId}:trade` });
-      }
+      this.registerMint(normalized.mintAddress);
     });
 
     this.ws.addEventListener("close", () => {
@@ -62,6 +67,13 @@ export class PumpPortalAdapter implements SourceAdapter {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
   }
 
+  registerMint(mintAddress: string): void {
+    if (!mintAddress || this.subscribedMints.has(mintAddress)) return;
+    this.subscribedMints.add(mintAddress);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mintAddress] }));
+  }
+
   getHealth(): SourceHealth {
     return {
       source: this.source,
@@ -76,6 +88,9 @@ export class PumpPortalAdapter implements SourceAdapter {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       this.start(onEvent);
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        for (const mint of this.subscribedMints) this.registerMint(mint);
+      }
     }, 3000);
     this.reconnectTimer.unref();
   }
