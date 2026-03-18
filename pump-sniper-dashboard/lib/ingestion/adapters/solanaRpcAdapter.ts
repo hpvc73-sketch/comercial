@@ -11,8 +11,15 @@ export class SolanaRpcAdapter implements SourceAdapter {
   private requestId = 1;
   private reconnectTimer?: NodeJS.Timeout;
   private httpFallbackTimer?: NodeJS.Timeout;
+  private heartbeatTimer?: NodeJS.Timeout;
+  private reconnectCount = 0;
 
-  constructor(private rpcHttpUrl: string | undefined, private pumpProgramId: string, source: DataSource = "solana-rpc") {
+  constructor(
+    private rpcHttpUrl: string | undefined,
+    private pumpProgramId: string,
+    source: DataSource = "solana-rpc",
+    private wsUrlOverride?: string,
+  ) {
     this.source = source;
   }
 
@@ -30,6 +37,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
     this.ws = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.httpFallbackTimer) clearInterval(this.httpFallbackTimer);
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
   }
 
   getHealth(): SourceHealth {
@@ -43,17 +51,50 @@ export class SolanaRpcAdapter implements SourceAdapter {
   }
 
   private connectWs(onEvent: (event: UnifiedTokenEvent) => void) {
-    const wsUrl = this.rpcHttpUrl?.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+    const wsUrl = this.wsUrlOverride ?? this.rpcHttpUrl?.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
     if (!wsUrl) return;
 
-    this.log(`a tentar ligação WS RPC: ${wsUrl}`);
+    this.log(`ws reconnecting: ${wsUrl}`);
+    onEvent({
+      eventId: `health:ws-reconnecting:${Date.now()}:${this.source}`,
+      source: this.source,
+      eventType: "health",
+      timestamp: Date.now(),
+      warning: "ws reconnecting",
+    });
     this.ws = new WebSocket(wsUrl);
 
     this.ws.addEventListener("open", () => {
       this.connected = true;
       this.warning = undefined;
       this.subscribeLogs();
-      this.log("ligação WS RPC estabelecida com sucesso");
+      this.startHeartbeat(onEvent);
+      if (this.reconnectCount > 0) {
+        this.log("ws reconnected");
+        onEvent({
+          eventId: `health:ws-reconnected:${Date.now()}:${this.source}`,
+          source: this.source,
+          eventType: "health",
+          timestamp: Date.now(),
+          warning: "ws reconnected",
+        });
+      } else {
+        this.log("ws connected");
+        onEvent({
+          eventId: `health:ws-connected:${Date.now()}:${this.source}`,
+          source: this.source,
+          eventType: "health",
+          timestamp: Date.now(),
+          warning: "ws connected",
+        });
+      }
+      onEvent({
+        eventId: `health:subscriptions-restored:${Date.now()}:${this.source}`,
+        source: this.source,
+        eventType: "health",
+        timestamp: Date.now(),
+        warning: "subscriptions restored",
+      });
       onEvent({ eventId: `health:${Date.now()}:${this.source}`, source: this.source, eventType: "health", timestamp: Date.now() });
     });
 
@@ -140,7 +181,15 @@ export class SolanaRpcAdapter implements SourceAdapter {
 
     this.ws.addEventListener("close", () => {
       this.ws = null;
-      this.log("WS RPC fechado; fallback para HTTP e reconexão automática");
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+      this.log("ws disconnected");
+      onEvent({
+        eventId: `health:ws-disconnected:${Date.now()}:${this.source}`,
+        source: this.source,
+        eventType: "health",
+        timestamp: Date.now(),
+        warning: "ws disconnected",
+      });
       this.startHttpFallback(onEvent);
       this.scheduleReconnect(onEvent);
     });
@@ -191,6 +240,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
+      this.reconnectCount += 1;
       if (this.httpFallbackTimer) {
         clearInterval(this.httpFallbackTimer);
         this.httpFallbackTimer = undefined;
@@ -198,6 +248,16 @@ export class SolanaRpcAdapter implements SourceAdapter {
       this.connectWs(onEvent);
     }, 3000);
     this.reconnectTimer.unref();
+  }
+
+  private startHeartbeat(onEvent: (event: UnifiedTokenEvent) => void) {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.ws.send(JSON.stringify({ jsonrpc: "2.0", id: this.requestId++, method: "getHealth", params: [] }));
+      onEvent({ eventId: `health:heartbeat:${Date.now()}:${this.source}`, source: this.source, eventType: "health", timestamp: Date.now() });
+    }, 15_000);
+    this.heartbeatTimer.unref();
   }
 
   private extractMintCandidates(logs: string[]): string[] {

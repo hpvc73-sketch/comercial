@@ -67,13 +67,17 @@ export default function HomePage() {
     const source = new EventSource("/api/monitor/events");
     source.onopen = () => {
       if (!mounted) return;
-      setStatus("connected");
+      setStatus("connecting");
       if (polling) {
         clearInterval(polling);
         polling = null;
       }
     };
-    source.onmessage = (ev) => applyState(JSON.parse(ev.data));
+    source.onmessage = (ev) => {
+      const next = JSON.parse(ev.data) as MonitorState;
+      if (next.streamStats.receivedSinceStartup > 0) setStatus("connected");
+      applyState(next);
+    };
     source.onerror = () => {
       if (!mounted) return;
       setStatus("fallback");
@@ -175,7 +179,8 @@ export default function HomePage() {
       <p style={{ opacity: 0.85, marginTop: 0 }}>Status stream: {status === "connected" ? "SSE live" : "Fallback polling"}</p>
       {state.dataWarning ? <p className="warning-box">⚠ {state.dataWarning}</p> : null}
       <p style={{ fontSize: 12, opacity: 0.9 }}>
-        last update: <strong>{new Date(state.streamStats.lastUpdateAt).toLocaleTimeString("pt-PT")}</strong> · since startup:{" "}
+        last token received: <strong>{new Date(state.streamStats.lastTokenReceivedAt).toLocaleTimeString("pt-PT")}</strong> · last live update:{" "}
+        <strong>{new Date(state.streamStats.lastLiveUpdateAt).toLocaleTimeString("pt-PT")}</strong> · since startup:{" "}
         <strong>{state.streamStats.receivedSinceStartup}</strong> · last 60s: <strong>{state.streamStats.receivedLast60s}</strong>
       </p>
 

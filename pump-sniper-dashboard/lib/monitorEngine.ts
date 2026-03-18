@@ -51,11 +51,13 @@ class MonitorEngine extends EventEmitter {
   private tradeTimestamps: number[] = [];
 
   private staleTimer?: NodeJS.Timeout;
+  private streamStallTimer?: NodeJS.Timeout;
   private lastDebugLogAt = 0;
   private heliusRpcUrl?: string;
   private enrichmentInFlight = new Set<string>();
   private lastHeliusPlanWarningAt = 0;
   private streamEventTimestamps: number[] = [];
+  private lastStallWarningAt = 0;
 
   constructor() {
     super();
@@ -85,7 +87,8 @@ class MonitorEngine extends EventEmitter {
       streamStats: {
         receivedSinceStartup: 0,
         receivedLast60s: 0,
-        lastUpdateAt: Date.now(),
+        lastTokenReceivedAt: Date.now(),
+        lastLiveUpdateAt: Date.now(),
       },
     };
   }
@@ -97,7 +100,7 @@ class MonitorEngine extends EventEmitter {
   start() {
     if (this.adapters.length > 0) return;
 
-    const detectedEnv = ["SOLANA_RPC_URL", "HELIUS_API_KEY", "HELIUS_RPC_URL", "HELIUS_WS_URL", "HELIUS_GRPC_WS_URL", "PUMPFUN_PROGRAM_ID"]
+    const detectedEnv = ["SOLANA_RPC_URL", "SOLANA_WS_URL", "HELIUS_API_KEY", "HELIUS_RPC_URL", "HELIUS_WS_URL", "HELIUS_GRPC_WS_URL", "PUMPFUN_PROGRAM_ID"]
       .filter((key) => Boolean(process.env[key]));
 
     const heliusRpcUrl =
@@ -108,7 +111,8 @@ class MonitorEngine extends EventEmitter {
     const solanaRpcUrl =
       process.env.SOLANA_RPC_URL ??
       heliusRpcUrl ??
-      "https://beta.helius-rpc.com/?api-key=243e2279-93a7-4c94-835d-3d71155b03d0";
+      "https://mainnet.helius-rpc.com/?api-key=243e2279-93a7-4c94-835d-3d71155b03d0";
+    const solanaWsUrl = process.env.SOLANA_WS_URL ?? undefined;
 
     const heliusWs =
       process.env.HELIUS_WS_URL ??
@@ -120,7 +124,7 @@ class MonitorEngine extends EventEmitter {
     const useHeliusAsPrimary = solanaRpcUrl.includes("helius");
 
     const pumpPortal = new PumpPortalAdapter();
-    const solanaRpc = new SolanaRpcAdapter(solanaRpcUrl, pumpProgramId, useHeliusAsPrimary ? "helius-rpc" : "solana-rpc");
+    const solanaRpc = new SolanaRpcAdapter(solanaRpcUrl, pumpProgramId, useHeliusAsPrimary ? "helius-rpc" : "solana-rpc", solanaWsUrl);
 
     this.adapters = [pumpPortal, solanaRpc];
 
@@ -139,6 +143,8 @@ class MonitorEngine extends EventEmitter {
 
     this.staleTimer = setInterval(() => this.markStaleTokens(), 15_000);
     this.staleTimer.unref();
+    this.streamStallTimer = setInterval(() => this.detectStreamStall(), 20_000);
+    this.streamStallTimer.unref();
 
     this.log("Ingestão multi-source iniciada (pumpportal + solana-rpc + helius-grpc opcional)");
   }
@@ -188,7 +194,8 @@ class MonitorEngine extends EventEmitter {
     this.streamEventTimestamps = this.streamEventTimestamps.filter((ts) => Date.now() - ts <= 60_000);
     this.state.streamStats.receivedSinceStartup += 1;
     this.state.streamStats.receivedLast60s = this.streamEventTimestamps.length;
-    this.state.streamStats.lastUpdateAt = Date.now();
+    this.state.streamStats.lastLiveUpdateAt = Date.now();
+    this.state.streamStats.lastTokenReceivedAt = Date.now();
 
     const candidate = this.validatePumpCandidate(event);
     if (!candidate.ok) {
@@ -438,6 +445,15 @@ class MonitorEngine extends EventEmitter {
     }
     this.refreshStateFromStore();
     this.emitUpdate();
+  }
+
+  private detectStreamStall() {
+    const secondsSinceToken = Math.floor((Date.now() - this.state.streamStats.lastTokenReceivedAt) / 1000);
+    const hasAnyConnectedSource = this.state.sourceHealth.some((entry) => entry.connected);
+    if (hasAnyConnectedSource && secondsSinceToken > 75 && Date.now() - this.lastStallWarningAt > 60_000) {
+      this.lastStallWarningAt = Date.now();
+      this.log(`warning: stream connected but no new tokens for ${secondsSinceToken}s`);
+    }
   }
 
   private upsertSignalForSnapshot(token: TokenSnapshot) {

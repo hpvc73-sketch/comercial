@@ -145,6 +145,7 @@ export interface MonitorState {
   streamStats: {
     receivedSinceStartup: number;
     receivedLast60s: number;
-    lastUpdateAt: number;
+    lastTokenReceivedAt: number;
+    lastLiveUpdateAt: number;
   };
 }
