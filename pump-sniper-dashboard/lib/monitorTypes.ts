@@ -98,10 +98,6 @@ export interface MonitorSettings {
   paperBankrollUsd: number;
   strategy: StrategyConfig;
   realTrading: RealTradingConfig;
-  filters: {
-    minRisk: number;
-    maxRisk: number;
-  };
 }
 
 export interface MonitorState {
@@ -114,7 +110,5 @@ export interface MonitorState {
   logs: string[];
   metrics: DailyMetrics;
   settings: MonitorSettings;
-  balances: {
-    paperUsd: number;
-  };
+  balances: { paperUsd: number };
 }

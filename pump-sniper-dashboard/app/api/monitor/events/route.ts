@@ -1,18 +1,20 @@
-import { monitorEngine } from "../../../../lib/monitorEngine";
+import { getMonitorEngine } from "../../../../lib/monitorEngine";
+
+export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const engine = getMonitorEngine();
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     start(controller) {
-      const send = () => {
-        const payload = JSON.stringify(monitorEngine.getState());
-        controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+      const sendState = () => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(engine.getState())}\n\n`));
       };
 
-      send();
-      const listener = () => send();
-      monitorEngine.on("update", listener);
+      sendState();
+      const listener = () => sendState();
+      engine.on("update", listener);
 
       const keepAlive = setInterval(() => {
         controller.enqueue(encoder.encode(`event: ping\ndata: ${Date.now()}\n\n`));
@@ -20,11 +22,8 @@ export async function GET() {
 
       return () => {
         clearInterval(keepAlive);
-        monitorEngine.off("update", listener);
+        engine.off("update", listener);
       };
-    },
-    cancel() {
-      // handled in start teardown
     },
   });
 
