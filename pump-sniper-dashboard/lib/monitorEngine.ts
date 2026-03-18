@@ -230,7 +230,8 @@ class MonitorEngine extends EventEmitter {
       token.firstDetectedSource = event.source;
     }
     if (event.tokenCreatedAt && event.tokenCreatedAt > 0) {
-      token.tokenCreatedAt = Math.min(token.tokenCreatedAt, event.tokenCreatedAt);
+      token.tokenCreatedAt = token.tokenCreatedAt ? Math.min(token.tokenCreatedAt, event.tokenCreatedAt) : event.tokenCreatedAt;
+      token.tokenAgeSource = "provider";
     }
 
     if (event.source === "pumpportal" && event.eventType === "discovered") {
@@ -321,7 +322,6 @@ class MonitorEngine extends EventEmitter {
   private refreshStateFromStore() {
     const tokens = this.store
       .all()
-      .filter((token) => Math.floor((Date.now() - token.tokenCreatedAt) / 1000) <= HARD_MAX_TOKEN_AGE_SECONDS)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 120)
       .map<TokenSnapshot>((token) => {
@@ -360,7 +360,7 @@ class MonitorEngine extends EventEmitter {
 
         const preferredSource = token.pumpPortalTradeCount > 0 ? "pumpportal" : token.firstDetectedSource;
 
-        const hasRealAge = token.tokenCreatedAt > 0;
+        const hasRealAge = typeof token.tokenCreatedAt === "number";
         const qualitySignals = [
           token.priceUsd !== null,
           token.volumeUsd !== null,
@@ -369,13 +369,25 @@ class MonitorEngine extends EventEmitter {
         ].filter(Boolean).length;
         const dataQuality: TokenSnapshot["dataQuality"] = qualitySignals >= 4 ? "complete" : qualitySignals >= 2 ? "partial" : "low";
 
-        const ageSeconds = Math.floor((now - token.tokenCreatedAt) / 1000);
-        const freshness: TokenSnapshot["freshness"] =
-          ageSeconds <= FRESH_TOKEN_AGE_SECONDS ? "fresh" : ageSeconds <= HARD_MAX_TOKEN_AGE_SECONDS ? "aging" : "late";
+        const realTokenAgeSeconds = hasRealAge ? Math.floor((now - (token.tokenCreatedAt as number)) / 1000) : null;
+        const seenByBotAgeSeconds = Math.floor((now - token.createdAt) / 1000);
+        let freshness: TokenSnapshot["freshness"] = "unknown";
+        if (realTokenAgeSeconds !== null) {
+          freshness =
+            realTokenAgeSeconds <= FRESH_TOKEN_AGE_SECONDS
+              ? "fresh"
+              : realTokenAgeSeconds <= HARD_MAX_TOKEN_AGE_SECONDS
+                ? "aging"
+                : "late";
+        } else if (token.parsedTradeCount >= 3) {
+          freshness = "late";
+        }
+        const realAgeQuality: TokenSnapshot["realAgeQuality"] =
+          token.tokenAgeSource === "unknown" ? "unknown" : token.tokenAgeSource === "estimated" ? "estimated" : "exact";
         const lifecycle: TokenSnapshot["lifecycle"] =
           token.parsedTradeCount >= 1 && hasRealAge ? "tradable" : token.parsedTradeCount >= 1 ? "enriched" : "discovered";
         token.lifecycle = lifecycle;
-        const sniperReady = lifecycle === "tradable";
+        const sniperReady = lifecycle === "tradable" && realTokenAgeSeconds !== null && realTokenAgeSeconds <= HARD_MAX_TOKEN_AGE_SECONDS;
 
         return {
           mintAddress: token.mintAddress,
@@ -393,7 +405,10 @@ class MonitorEngine extends EventEmitter {
           firstSeenTimestamp: token.createdAt,
           tokenCreatedAt: token.tokenCreatedAt,
           createdAt: token.createdAt,
-          ageSeconds,
+          ageSeconds: realTokenAgeSeconds,
+          realTokenAgeSeconds,
+          realAgeQuality,
+          seenByBotAgeSeconds,
           freshness,
           lastMetricUpdateAt: token.updatedAt,
           price: token.priceUsd !== null ? Number(token.priceUsd.toFixed(8)) : null,
@@ -676,7 +691,10 @@ class MonitorEngine extends EventEmitter {
         }
       }
 
-      if (Number.isFinite(earliestBlockTimeMs)) token.tokenCreatedAt = Math.min(token.tokenCreatedAt, earliestBlockTimeMs);
+      if (Number.isFinite(earliestBlockTimeMs)) {
+        token.tokenCreatedAt = token.tokenCreatedAt ? Math.min(token.tokenCreatedAt, earliestBlockTimeMs) : earliestBlockTimeMs;
+        token.tokenAgeSource = "chain";
+      }
       if (parsedTrades > 0) {
         token.parsedTradeCount = parsedTrades;
         wallets.forEach((wallet) => token.buyerWallets.add(wallet));

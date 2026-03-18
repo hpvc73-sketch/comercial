@@ -116,7 +116,7 @@ export default function HomePage() {
 
     const tokens = state.tokens.filter((token) => {
       if (!token.isValidPumpCandidate) return false;
-      if (token.ageSeconds > maxAgeFilter) {
+      if (token.realTokenAgeSeconds !== null && token.realTokenAgeSeconds > maxAgeFilter) {
         excludedByState += 1;
         return false;
       }
@@ -260,7 +260,8 @@ export default function HomePage() {
 }
 
 function TokenRow({ token }: { token: TokenSnapshot }) {
-  const rowBg = token.freshness === "fresh" ? "#052e16" : token.freshness === "aging" ? "transparent" : "#3f1d1d";
+  const rowBg =
+    token.freshness === "fresh" ? "#052e16" : token.freshness === "aging" ? "transparent" : token.freshness === "unknown" ? "#111827" : "#3f1d1d";
   return (
     <tr style={{ borderTop: "1px solid #1e293b", background: rowBg }}>
       <td>
@@ -275,7 +276,7 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{fmtUsd(token.volumeUsd)}</td>
       <td>{fmtNumber(token.buysPerSecond, 2)}</td>
       <td>{token.uniqueWallets ?? "N/A"}</td>
-      <td>{formatAge(token.ageSeconds)}</td>
+      <td>{formatAge(token.realTokenAgeSeconds, token.realAgeQuality)}</td>
       <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
       <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
       <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
@@ -283,6 +284,9 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
         <strong>{token.lifecycle}</strong>
         <div style={{ fontSize: 11, opacity: 0.8 }}>
           parsed trades: {token.parsedTradeCount} · ready: {token.sniperReady ? "yes" : "no"}
+        </div>
+        <div style={{ fontSize: 11, opacity: 0.8 }}>
+          real age: {formatAge(token.realTokenAgeSeconds, token.realAgeQuality)} · seen by bot: {formatAge(token.seenByBotAgeSeconds, "exact")}
         </div>
         <div style={{ fontSize: 11, opacity: 0.8 }}>
           last metric: {new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}
@@ -293,11 +297,13 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
   );
 }
 
-function formatAge(seconds: number) {
+function formatAge(seconds: number | null, quality: "exact" | "estimated" | "unknown") {
+  if (seconds === null) return "unknown";
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const rem = seconds % 60;
-  return rem === 0 ? `${minutes}m` : `${minutes}m ${rem}s`;
+  const base = rem === 0 ? `${minutes}m` : `${minutes}m ${rem}s`;
+  return quality === "estimated" ? `~${base}` : base;
 }
 
 function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {
