@@ -21,6 +21,8 @@ const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const BUY_WINDOW_MS = 5_000;
 const MAX_RECENT_TRADES = 120;
 const MIN_UNIQUE_WALLETS_FOR_ENTRY = 20;
+const HARD_MAX_TOKEN_AGE_SECONDS = 120;
+const FRESH_TOKEN_AGE_SECONDS = 30;
 
 const DEFAULT_SETTINGS: MonitorSettings = {
   paperBankrollUsd: 5000,
@@ -181,6 +183,7 @@ class MonitorEngine extends EventEmitter {
     const token = this.store.getOrCreate(event.mintAddress, {
       source: event.source,
       timestamp: event.timestamp,
+      tokenCreatedAt: event.tokenCreatedAt,
       symbol: event.symbol,
       name: event.name,
       discoveryStatus: event.discoveryStatus,
@@ -201,6 +204,9 @@ class MonitorEngine extends EventEmitter {
     if (event.timestamp < token.firstDetectedAt) {
       token.firstDetectedAt = event.timestamp;
       token.firstDetectedSource = event.source;
+    }
+    if (event.tokenCreatedAt && event.tokenCreatedAt > 0) {
+      token.tokenCreatedAt = Math.min(token.tokenCreatedAt, event.tokenCreatedAt);
     }
 
     if (event.source === "pumpportal" && event.eventType === "discovered") {
@@ -292,6 +298,7 @@ class MonitorEngine extends EventEmitter {
     const tokens = this.store
       .all()
       .filter((token) => token.pumpPortalTradeCount > 0)
+      .filter((token) => Math.floor((Date.now() - token.tokenCreatedAt) / 1000) <= HARD_MAX_TOKEN_AGE_SECONDS)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 120)
       .map<TokenSnapshot>((token) => {
@@ -338,6 +345,10 @@ class MonitorEngine extends EventEmitter {
         ].filter(Boolean).length;
         const dataQuality: TokenSnapshot["dataQuality"] = qualitySignals >= 4 ? "complete" : qualitySignals >= 2 ? "partial" : "low";
 
+        const ageSeconds = Math.floor((now - token.tokenCreatedAt) / 1000);
+        const freshness: TokenSnapshot["freshness"] =
+          ageSeconds <= FRESH_TOKEN_AGE_SECONDS ? "fresh" : ageSeconds <= HARD_MAX_TOKEN_AGE_SECONDS ? "aging" : "late";
+
         return {
           mintAddress: token.mintAddress,
           source: preferredSource,
@@ -348,8 +359,11 @@ class MonitorEngine extends EventEmitter {
           isValidPumpCandidate: true,
           symbol: token.symbol,
           name: token.name,
+          firstSeenTimestamp: token.createdAt,
+          tokenCreatedAt: token.tokenCreatedAt,
           createdAt: token.createdAt,
-          ageSeconds: Math.floor((now - token.createdAt) / 1000),
+          ageSeconds,
+          freshness,
           price: token.priceUsd !== null ? Number(token.priceUsd.toFixed(8)) : null,
           volumeUsd: token.volumeUsd !== null ? Number(token.volumeUsd.toFixed(2)) : null,
           buysPerSecond,

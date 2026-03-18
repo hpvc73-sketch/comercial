@@ -10,6 +10,7 @@ export interface UnifiedTokenEvent {
   symbol?: string;
   name?: string;
   timestamp: number;
+  tokenCreatedAt?: number;
   discoveryStatus?: DiscoveryStatus;
   confirmationStatus?: ConfirmationStatus;
   priceUsd?: number;

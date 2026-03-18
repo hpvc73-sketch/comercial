@@ -18,8 +18,11 @@ export interface TokenSnapshot {
   isValidPumpCandidate: boolean;
   symbol: string;
   name: string;
+  firstSeenTimestamp: number;
+  tokenCreatedAt: number;
   createdAt: number;
   ageSeconds: number;
+  freshness: "fresh" | "aging" | "late";
   price: number | null;
   volumeUsd: number | null;
   buysPerSecond: number | null;

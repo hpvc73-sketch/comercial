@@ -8,6 +8,7 @@ export interface LiveTokenState {
   discoveryStatus: DiscoveryStatus;
   confirmationStatus: ConfirmationStatus;
   createdAt: number;
+  tokenCreatedAt: number;
   updatedAt: number;
   priceUsd: number | null;
   volumeUsd: number | null;
@@ -48,6 +49,7 @@ export class LiveStateStore {
       discoveryStatus: defaults.discoveryStatus ?? "discovered",
       confirmationStatus: defaults.confirmationStatus ?? "unconfirmed",
       createdAt: defaults.timestamp,
+      tokenCreatedAt: defaults.tokenCreatedAt ?? defaults.timestamp,
       updatedAt: defaults.timestamp,
       priceUsd: defaults.priceUsd ?? null,
       volumeUsd: defaults.volumeUsd ?? null,

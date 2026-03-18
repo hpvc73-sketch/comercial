@@ -26,6 +26,7 @@ async function fetchState(): Promise<MonitorState> {
 export default function HomePage() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [riskFilter, setRiskFilter] = useState(70);
+  const [maxAgeFilter, setMaxAgeFilter] = useState(60);
   const [status, setStatus] = useState<"connecting" | "connected" | "fallback">("connecting");
   const [freshSignalIds, setFreshSignalIds] = useState<Set<string>>(new Set());
   const seenSignalIds = useRef<Set<string>>(new Set());
@@ -105,12 +106,16 @@ export default function HomePage() {
     }
 
     let excludedByRisk = 0;
-    const excludedByVolume = 0;
+    let excludedByVolume = 0;
     const excludedByMissingMetrics = 0;
-    const excludedByState = 0;
+    let excludedByState = 0;
 
     const tokens = state.tokens.filter((token) => {
       if (!token.isValidPumpCandidate) return false;
+      if (token.ageSeconds > maxAgeFilter) {
+        excludedByState += 1;
+        return false;
+      }
       if (token.riskScore === null) return true;
       const include = token.riskScore <= riskFilter;
       if (!include) excludedByRisk += 1;
@@ -131,7 +136,7 @@ export default function HomePage() {
         state: excludedByState,
       },
     };
-  }, [state, riskFilter]);
+  }, [state, riskFilter, maxAgeFilter]);
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -210,6 +215,10 @@ export default function HomePage() {
         <label>Filtro de risco ≤ {riskFilter} </label>
         <input type="range" min={0} max={100} value={riskFilter} onChange={(e) => setRiskFilter(Number(e.target.value))} />
       </div>
+      <div style={{ marginBottom: 10 }}>
+        <label>Idade máxima do token: {maxAgeFilter}s </label>
+        <input type="range" min={10} max={120} step={5} value={maxAgeFilter} onChange={(e) => setMaxAgeFilter(Number(e.target.value))} />
+      </div>
 
       <table width="100%" cellPadding={6} style={{ borderCollapse: "collapse", marginBottom: 18 }}>
         <thead>
@@ -219,6 +228,7 @@ export default function HomePage() {
             <th align="left">Volume</th>
             <th align="left">Buys/s</th>
             <th align="left">Wallets</th>
+            <th align="left">Age</th>
             <th align="left">Concentração</th>
             <th align="left">Risco</th>
             <th align="left">Fonte</th>
@@ -240,8 +250,9 @@ export default function HomePage() {
 }
 
 function TokenRow({ token }: { token: TokenSnapshot }) {
+  const rowBg = token.freshness === "fresh" ? "#052e16" : token.freshness === "aging" ? "transparent" : "#3f1d1d";
   return (
-    <tr style={{ borderTop: "1px solid #1e293b" }}>
+    <tr style={{ borderTop: "1px solid #1e293b", background: rowBg }}>
       <td>
         <a className="token-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
           <strong>{token.symbol}</strong> <span style={{ opacity: 0.8 }}>({token.name})</span>
@@ -254,12 +265,20 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{fmtUsd(token.volumeUsd)}</td>
       <td>{fmtNumber(token.buysPerSecond, 2)}</td>
       <td>{token.uniqueWallets ?? "N/A"}</td>
+      <td>{formatAge(token.ageSeconds)}</td>
       <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
       <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
       <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
       <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.confirmationStatus === "confirmed" ? token.discoveryStatus : "partial"} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>quality: <strong>{token.dataQuality}</strong> · Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
     </tr>
   );
+}
+
+function formatAge(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  return rem === 0 ? `${minutes}m` : `${minutes}m ${rem}s`;
 }
 
 function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {

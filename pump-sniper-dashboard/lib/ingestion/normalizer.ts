@@ -12,6 +12,13 @@ function readNumber(payload: Record<string, unknown>, keys: string[]): number | 
   return undefined;
 }
 
+function readTimestampMs(payload: Record<string, unknown>, keys: string[]): number | undefined {
+  const value = readNumber(payload, keys);
+  if (!value || !Number.isFinite(value)) return undefined;
+  if (value < 1_000_000_000_000) return Math.floor(value * 1000);
+  return Math.floor(value);
+}
+
 export function normalizePumpPortalPayload(payload: Record<string, unknown>, eventType: UnifiedTokenEvent["eventType"]): UnifiedTokenEvent | null {
   const mintAddress =
     (typeof payload.mint === "string" && payload.mint) ||
@@ -32,6 +39,7 @@ export function normalizePumpPortalPayload(payload: Record<string, unknown>, eve
   const usdAmount = readNumber(payload, ["usdAmount", "volumeUsd", "amountUsd", "notionalUsd"]);
   const tokenAmount = readNumber(payload, ["tokenAmount", "amountTokens", "tokensOut", "tokensIn"]);
   const solAmount = readNumber(payload, ["solAmount", "amountSol", "solIn", "solOut"]);
+  const tokenCreatedAt = readTimestampMs(payload, ["tokenCreatedAt", "createdAt", "createdTimestamp", "mintedAt", "time"]);
 
   return {
     eventId: `${eventType}:${mintAddress}:${payload.signature ?? payload.timestamp ?? Date.now()}`,
@@ -41,6 +49,7 @@ export function normalizePumpPortalPayload(payload: Record<string, unknown>, eve
     symbol,
     name,
     timestamp: Date.now(),
+    tokenCreatedAt,
     discoveryStatus: eventType === "migrated" ? "migrated" : eventType === "discovered" ? "discovered" : undefined,
     confirmationStatus: "unconfirmed",
     priceUsd,
