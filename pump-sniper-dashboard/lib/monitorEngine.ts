@@ -9,6 +9,16 @@ import { SolanaRpcAdapter } from "./ingestion/adapters/solanaRpcAdapter";
 import { HeliusGrpcAdapter } from "./ingestion/adapters/heliusGrpcAdapter";
 import { SourceAdapter, UnifiedTokenEvent } from "./ingestion/types";
 
+const BLOCKED_ADDRESSES = new Set([
+  "11111111111111111111111111111111",
+  "ComputeBudget111111111111111111111111111111",
+  "SysvarRent111111111111111111111111111111111",
+  "SysvarC1ock11111111111111111111111111111111",
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "ATokenGPvR93Af2U4f2S7jH9MuNoMNFkQJUon2cRPn7A",
+]);
+const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
 const DEFAULT_SETTINGS: MonitorSettings = {
   paperBankrollUsd: 5000,
   strategy: {
@@ -47,6 +57,7 @@ class MonitorEngine extends EventEmitter {
       dataMode: "unavailable",
       dataWarning: "A ligar às fontes live...",
       sourceHealth: [],
+      diagnostics: { detectedEnv: [], providersInitialized: [], providersSkipped: [] },
       tokens: [],
       signals: [],
       positions: [],
@@ -72,19 +83,43 @@ class MonitorEngine extends EventEmitter {
   start() {
     if (this.adapters.length > 0) return;
 
+    const detectedEnv = ["SOLANA_RPC_URL", "HELIUS_API_KEY", "HELIUS_RPC_URL", "HELIUS_WS_URL", "HELIUS_GRPC_WS_URL", "PUMPFUN_PROGRAM_ID"]
+      .filter((key) => Boolean(process.env[key]));
+
+    const heliusRpcUrl =
+      process.env.HELIUS_RPC_URL ??
+      (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : undefined);
+
     const solanaRpcUrl =
       process.env.SOLANA_RPC_URL ??
+      heliusRpcUrl ??
       "https://beta.helius-rpc.com/?api-key=243e2279-93a7-4c94-835d-3d71155b03d0";
+
     const heliusWs =
+      process.env.HELIUS_WS_URL ??
       process.env.HELIUS_GRPC_WS_URL ??
-      (process.env.HELIUS_API_KEY ? `wss://atlas-mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : undefined);
+      (process.env.HELIUS_API_KEY ? `wss://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : undefined);
+
     const pumpProgramId = process.env.PUMPFUN_PROGRAM_ID ?? "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
-    const pumpPortal = new PumpPortalAdapter();
-    const solanaRpc = new SolanaRpcAdapter(solanaRpcUrl, pumpProgramId);
-    const helius = new HeliusGrpcAdapter(heliusWs, pumpProgramId);
+    const useHeliusAsPrimary = solanaRpcUrl.includes("helius");
 
-    this.adapters = [pumpPortal, solanaRpc, helius];
+    const pumpPortal = new PumpPortalAdapter();
+    const solanaRpc = new SolanaRpcAdapter(solanaRpcUrl, pumpProgramId, useHeliusAsPrimary ? "helius-rpc" : "solana-rpc");
+
+    this.adapters = [pumpPortal, solanaRpc];
+
+    if (process.env.HELIUS_GRPC_WS_URL) {
+      const heliusGrpc = new HeliusGrpcAdapter(process.env.HELIUS_GRPC_WS_URL, pumpProgramId);
+      this.adapters.push(heliusGrpc);
+      this.state.diagnostics.providersInitialized.push("helius-grpc");
+    } else {
+      this.state.diagnostics.providersSkipped.push("helius-grpc (not configured)");
+    }
+
+    this.state.diagnostics.detectedEnv = detectedEnv;
+    this.state.diagnostics.providersInitialized.push("pumpportal", useHeliusAsPrimary ? "helius-rpc" : "solana-rpc");
+
     this.adapters.forEach((adapter) => adapter.start((event) => this.onUnifiedEvent(event)));
 
     this.staleTimer = setInterval(() => this.markStaleTokens(), 15_000);
@@ -106,6 +141,22 @@ class MonitorEngine extends EventEmitter {
     this.emitUpdate();
   }
 
+  private validatePumpCandidate(event: UnifiedTokenEvent): { ok: boolean; reason?: string } {
+    const mint = event.mintAddress ?? "";
+    if (!BASE58_RE.test(mint)) return { ok: false, reason: "invalid mint" };
+    if (BLOCKED_ADDRESSES.has(mint)) {
+      if (mint.startsWith("ComputeBudget")) return { ok: false, reason: "program id" };
+      if (mint === "11111111111111111111111111111111") return { ok: false, reason: "system account" };
+      return { ok: false, reason: "non-pump candidate" };
+    }
+    if (event.source === "pumpportal") return { ok: true };
+
+    const plausibleBySuffix = mint.endsWith("pump");
+    if (!plausibleBySuffix) return { ok: false, reason: "non-pump candidate" };
+
+    return { ok: true };
+  }
+
   private onUnifiedEvent(event: UnifiedTokenEvent) {
     if (this.dedup.isDuplicate(event.eventId)) return;
 
@@ -117,6 +168,12 @@ class MonitorEngine extends EventEmitter {
     }
 
     if (!event.mintAddress) return;
+
+    const candidate = this.validatePumpCandidate(event);
+    if (!candidate.ok) {
+      this.log(`rejected: ${candidate.reason} ${event.mintAddress}`);
+      return;
+    }
 
     const token = this.store.getOrCreate(event.mintAddress, {
       source: event.source,
@@ -234,6 +291,7 @@ class MonitorEngine extends EventEmitter {
           sourceLatencyMs,
           discoveryStatus: token.discoveryStatus,
           confirmationStatus: token.confirmationStatus,
+          isValidPumpCandidate: true,
           symbol: token.symbol,
           name: token.name,
           createdAt: token.createdAt,

@@ -1,26 +1,26 @@
-import { SourceAdapter, SourceHealth, UnifiedTokenEvent } from "../types";
+import { DataSource, SourceAdapter, SourceHealth, UnifiedTokenEvent } from "../types";
 
 const BASE58_RE = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
 
 export class SolanaRpcAdapter implements SourceAdapter {
-  readonly source = "solana-rpc" as const;
+  readonly source: DataSource;
   private ws: WebSocket | null = null;
   private connected = false;
-  private usingHttpFallback = false;
   private lastEventAt?: number;
   private warning?: string;
   private requestId = 1;
   private reconnectTimer?: NodeJS.Timeout;
   private httpFallbackTimer?: NodeJS.Timeout;
 
-  constructor(private rpcHttpUrl: string | undefined, private pumpProgramId: string) {}
+  constructor(private rpcHttpUrl: string | undefined, private pumpProgramId: string, source: DataSource = "solana-rpc") {
+    this.source = source;
+  }
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
     if (!this.rpcHttpUrl) {
       this.warning = "SOLANA_RPC_URL não configurado (obrigatório).";
       return;
     }
-
     if (this.ws || this.httpFallbackTimer) return;
     this.connectWs(onEvent);
   }
@@ -38,6 +38,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
       connected: this.connected,
       lastEventAt: this.lastEventAt,
       warning: this.warning,
+      enabled: Boolean(this.rpcHttpUrl),
     };
   }
 
@@ -50,11 +51,10 @@ export class SolanaRpcAdapter implements SourceAdapter {
 
     this.ws.addEventListener("open", () => {
       this.connected = true;
-      this.usingHttpFallback = false;
       this.warning = undefined;
       this.subscribeLogs();
       this.log("ligação WS RPC estabelecida com sucesso");
-      onEvent({ eventId: `health:${Date.now()}:solana`, source: this.source, eventType: "health", timestamp: Date.now() });
+      onEvent({ eventId: `health:${Date.now()}:${this.source}`, source: this.source, eventType: "health", timestamp: Date.now() });
     });
 
     this.ws.addEventListener("message", (message) => {
@@ -87,7 +87,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
         const isLiquidity = lowerLogs.includes("liquidity") || lowerLogs.includes("add_liquidity");
 
         onEvent({
-          eventId: `solana-discovered:${mintAddress}:${Date.now()}`,
+          eventId: `${this.source}-discovered:${mintAddress}:${Date.now()}`,
           source: this.source,
           eventType: isCreate ? "discovered" : "trade",
           mintAddress,
@@ -99,7 +99,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
         });
 
         onEvent({
-          eventId: `solana-confirmed:${mintAddress}:${Date.now()}`,
+          eventId: `${this.source}-confirmed:${mintAddress}:${Date.now()}`,
           source: this.source,
           eventType: "confirmed",
           mintAddress,
@@ -109,7 +109,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
 
         if (isLiquidity) {
           onEvent({
-            eventId: `solana-liquidity:${mintAddress}:${Date.now()}`,
+            eventId: `${this.source}-liquidity:${mintAddress}:${Date.now()}`,
             source: this.source,
             eventType: "liquidity",
             mintAddress,
@@ -149,7 +149,6 @@ export class SolanaRpcAdapter implements SourceAdapter {
   private startHttpFallback(onEvent: (event: UnifiedTokenEvent) => void) {
     if (!this.rpcHttpUrl || this.httpFallbackTimer) return;
 
-    this.usingHttpFallback = true;
     this.warning = "WS indisponível; a usar HTTP fallback";
     this.httpFallbackTimer = setInterval(async () => {
       try {
@@ -162,7 +161,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         this.connected = true;
         this.lastEventAt = Date.now();
-        onEvent({ eventId: `health:http:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now() });
+        onEvent({ eventId: `health:http:${Date.now()}:${this.source}`, source: this.source, eventType: "health", timestamp: Date.now() });
       } catch (error) {
         this.connected = false;
         this.warning = `HTTP fallback falhou: ${(error as Error).message}`;
@@ -197,6 +196,6 @@ export class SolanaRpcAdapter implements SourceAdapter {
   }
 
   private log(message: string) {
-    console.info(`[solana-rpc] ${message}`);
+    console.info(`[${this.source}] ${message}`);
   }
 }

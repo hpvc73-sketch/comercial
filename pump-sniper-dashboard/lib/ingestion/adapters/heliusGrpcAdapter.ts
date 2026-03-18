@@ -8,11 +8,11 @@ export class HeliusGrpcAdapter implements SourceAdapter {
   private delegate?: SolanaRpcAdapter;
 
   constructor(private wsEndpoint: string | undefined, private pumpProgramId: string) {
-    if (wsEndpoint) this.delegate = new SolanaRpcAdapter(wsEndpoint, pumpProgramId);
+    if (wsEndpoint) this.delegate = new SolanaRpcAdapter(wsEndpoint, pumpProgramId, "helius-grpc");
   }
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
-    this.delegate?.start((event) => onEvent({ ...event, source: this.source }));
+    this.delegate?.start(onEvent);
   }
 
   stop(): void {

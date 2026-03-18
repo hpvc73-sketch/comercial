@@ -104,6 +104,7 @@ export default function HomePage() {
     const excludedByState = 0;
 
     const tokens = state.tokens.filter((token) => {
+      if (!token.isValidPumpCandidate) return false;
       if (token.riskScore === null) return true;
       const include = token.riskScore <= riskFilter;
       if (!include) excludedByRisk += 1;
@@ -170,9 +171,13 @@ export default function HomePage() {
       </div>
 
       <section style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <SourceHealthBadge name="pumpportal" state={state} />
-        <SourceHealthBadge name="solana-rpc" state={state} />
-        <SourceHealthBadge name="helius-grpc" state={state} />
+        {state.sourceHealth.map((source) => <SourceHealthBadge key={source.source} source={source} />)}
+      </section>
+
+      <section style={{ marginBottom: 12, fontSize: 12, opacity: 0.85 }}>
+        <div>env detected: {state.diagnostics.detectedEnv.join(", ") || "none"}</div>
+        <div>providers initialized: {state.diagnostics.providersInitialized.join(", ") || "none"}</div>
+        <div>providers skipped: {state.diagnostics.providersSkipped.join(", ") || "none"}</div>
       </section>
       <section style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12, marginBottom: 18 }}>
         <Card label="Saldo virtual" value={fmtUsd(state.balances.paperUsd)} />
@@ -246,7 +251,7 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
       <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
       <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
-      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.discoveryStatus} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
+      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.confirmationStatus === "confirmed" ? token.discoveryStatus : "partial"} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
     </tr>
   );
 }
@@ -281,13 +286,10 @@ function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSig
 }
 
 
-function SourceHealthBadge({ name, state }: { name: "pumpportal" | "solana-rpc" | "helius-grpc"; state: MonitorState }) {
-  const source = state.sourceHealth.find((item) => item.source === name);
-  const online = source?.connected ?? false;
-  const warning = source?.warning;
+function SourceHealthBadge({ source }: { source: MonitorState["sourceHealth"][number] }) {
   return (
-    <span className={online ? "badge-confirmed" : "badge-unconfirmed"} title={warning ?? ""}>
-      {name}: {online ? "ONLINE" : "OFFLINE"}
+    <span className={source.connected ? "badge-confirmed" : "badge-unconfirmed"} title={source.warning ?? ""}>
+      {source.source}: {source.connected ? "ONLINE" : "OFFLINE"}
     </span>
   );
 }

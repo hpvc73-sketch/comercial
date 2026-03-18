@@ -1,4 +1,4 @@
-export type DataSource = "pumpportal" | "solana-rpc" | "helius-grpc";
+export type DataSource = "pumpportal" | "solana-rpc" | "helius-rpc" | "helius-grpc";
 export type DiscoveryStatus = "discovered" | "migrated" | "stale";
 export type ConfirmationStatus = "unconfirmed" | "confirmed";
 
@@ -23,6 +23,7 @@ export interface UnifiedTokenEvent {
 export interface SourceHealth {
   source: DataSource;
   connected: boolean;
+  enabled?: boolean;
   lastEventAt?: number;
   warning?: string;
 }

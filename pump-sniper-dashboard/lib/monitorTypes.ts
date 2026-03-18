@@ -6,13 +6,16 @@ export interface RiskFactors {
   earlyDumpSignals: number;
 }
 
+export type ProviderSource = "pumpportal" | "solana-rpc" | "helius-rpc" | "helius-grpc";
+
 export interface TokenSnapshot {
   mintAddress: string;
-  source: "pumpportal" | "solana-rpc" | "helius-grpc";
-  firstDetectedSource: "pumpportal" | "solana-rpc" | "helius-grpc";
+  source: ProviderSource;
+  firstDetectedSource: ProviderSource;
   sourceLatencyMs: Record<string, number>;
   discoveryStatus: "discovered" | "migrated" | "stale";
   confirmationStatus: "unconfirmed" | "confirmed";
+  isValidPumpCandidate: boolean;
   symbol: string;
   name: string;
   createdAt: number;
@@ -31,7 +34,7 @@ export interface TokenSnapshot {
 export interface Signal {
   id: string;
   mintAddress: string;
-  source: "pumpportal" | "solana-rpc" | "helius-grpc";
+  source: ProviderSource;
   confirmationStatus: "unconfirmed" | "confirmed";
   tokenSymbol: string;
   tokenName: string;
@@ -101,10 +104,16 @@ export interface MonitorSettings {
 export type DataMode = "live" | "mock" | "unavailable";
 
 export interface SourceHealthView {
-  source: "pumpportal" | "solana-rpc" | "helius-grpc";
+  source: ProviderSource;
   connected: boolean;
   warning?: string;
   lastEventAt?: number;
+}
+
+export interface Diagnostics {
+  detectedEnv: string[];
+  providersInitialized: string[];
+  providersSkipped: string[];
 }
 
 export interface MonitorState {
@@ -113,6 +122,7 @@ export interface MonitorState {
   dataMode: DataMode;
   dataWarning?: string;
   sourceHealth: SourceHealthView[];
+  diagnostics: Diagnostics;
   tokens: TokenSnapshot[];
   signals: Signal[];
   positions: Position[];
