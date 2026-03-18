@@ -26,6 +26,7 @@ export interface TokenSnapshot {
   createdAt: number;
   ageSeconds: number;
   freshness: "fresh" | "aging" | "late";
+  lastMetricUpdateAt: number;
   price: number | null;
   volumeUsd: number | null;
   buysPerSecond: number | null;
@@ -40,6 +41,7 @@ export interface TokenSnapshot {
 
 export interface Signal {
   id: string;
+  category: "discovered" | "watch-candidate" | "trade-ready";
   mintAddress: string;
   source: ProviderSource;
   confirmationStatus: "unconfirmed" | "confirmed";
@@ -52,6 +54,8 @@ export interface Signal {
   buysPerSecond: number | null;
   riskScore: number | null;
   volumeUsd: number | null;
+  price: number | null;
+  parsedTradeCount: number;
 }
 
 export interface Position {
@@ -138,4 +142,9 @@ export interface MonitorState {
   metrics: DailyMetrics;
   settings: MonitorSettings;
   balances: { paperUsd: number };
+  streamStats: {
+    receivedSinceStartup: number;
+    receivedLast60s: number;
+    lastUpdateAt: number;
+  };
 }

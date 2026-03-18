@@ -174,6 +174,10 @@ export default function HomePage() {
       </div>
       <p style={{ opacity: 0.85, marginTop: 0 }}>Status stream: {status === "connected" ? "SSE live" : "Fallback polling"}</p>
       {state.dataWarning ? <p className="warning-box">⚠ {state.dataWarning}</p> : null}
+      <p style={{ fontSize: 12, opacity: 0.9 }}>
+        last update: <strong>{new Date(state.streamStats.lastUpdateAt).toLocaleTimeString("pt-PT")}</strong> · since startup:{" "}
+        <strong>{state.streamStats.receivedSinceStartup}</strong> · last 60s: <strong>{state.streamStats.receivedLast60s}</strong>
+      </p>
 
       <div style={{ display: "flex", gap: 16, marginBottom: 10, fontSize: 13, opacity: 0.9 }}>
         <span>tokens discovered: <strong>{state.tokens.length}</strong></span>
@@ -275,6 +279,9 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
         <div style={{ fontSize: 11, opacity: 0.8 }}>
           parsed trades: {token.parsedTradeCount} · ready: {token.sniperReady ? "yes" : "no"}
         </div>
+        <div style={{ fontSize: 11, opacity: 0.8 }}>
+          last metric: {new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}
+        </div>
       </td>
       <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.confirmationStatus === "confirmed" ? token.discoveryStatus : "partial"} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>quality: <strong>{token.dataQuality}</strong> · Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
     </tr>
@@ -307,7 +314,7 @@ function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSig
                 {signal.mintAddress}
               </a>
               <div style={{ marginTop: 4, fontSize: 13 }}>
-                buys/s <strong>{fmtNumber(signal.buysPerSecond, 2)}</strong> · risco <strong>{signal.riskScore === null ? "N/A" : signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
+                <strong>{signal.category}</strong> · buys/s <strong>{fmtNumber(signal.buysPerSecond, 2)}</strong> · price <strong>{fmtNumber(signal.price, 8)}</strong> · risco <strong>{signal.riskScore === null ? "N/A" : signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · parsed trades <strong>{signal.parsedTradeCount}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
               </div>
             </li>
           );

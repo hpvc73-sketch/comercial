@@ -9,6 +9,8 @@ export class PumpPortalAdapter implements SourceAdapter {
   private warning?: string;
   private reconnectTimer?: NodeJS.Timeout;
   private subscribedMints = new Set<string>();
+  private heartbeatTimer?: NodeJS.Timeout;
+  private reconnectCount = 0;
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
     if (this.ws) return;
@@ -23,6 +25,14 @@ export class PumpPortalAdapter implements SourceAdapter {
         this.ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
       }
       onEvent({ eventId: `health:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now() });
+      onEvent({
+        eventId: `health:stream:${Date.now()}`,
+        source: this.source,
+        eventType: "health",
+        timestamp: Date.now(),
+        warning: this.reconnectCount > 0 ? "stream reconnected; subscription restored" : "stream connected",
+      });
+      this.startHeartbeat(onEvent);
     });
 
     this.ws.addEventListener("message", (message) => {
@@ -47,12 +57,29 @@ export class PumpPortalAdapter implements SourceAdapter {
       this.lastEventAt = Date.now();
       onEvent(normalized);
       this.registerMint(normalized.mintAddress);
+      if (eventType === "discovered") {
+        onEvent({
+          eventId: `health:new-token:${normalized.mintAddress}:${Date.now()}`,
+          source: this.source,
+          eventType: "health",
+          timestamp: Date.now(),
+          warning: `new token appended to live state: ${normalized.mintAddress}`,
+        });
+      }
     });
 
     this.ws.addEventListener("close", () => {
       this.connected = false;
       this.warning = "PumpPortal websocket offline";
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       this.ws = null;
+      onEvent({
+        eventId: `health:disconnect:${Date.now()}`,
+        source: this.source,
+        eventType: "health",
+        timestamp: Date.now(),
+        warning: "stream disconnected",
+      });
       this.scheduleReconnect(onEvent);
     });
 
@@ -65,6 +92,7 @@ export class PumpPortalAdapter implements SourceAdapter {
     this.ws?.close();
     this.ws = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
   }
 
   registerMint(mintAddress: string): void {
@@ -87,11 +115,22 @@ export class PumpPortalAdapter implements SourceAdapter {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
+      this.reconnectCount += 1;
       this.start(onEvent);
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         for (const mint of this.subscribedMints) this.registerMint(mint);
       }
     }, 3000);
     this.reconnectTimer.unref();
+  }
+
+  private startHeartbeat(onEvent: (event: UnifiedTokenEvent) => void) {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.ws.send(JSON.stringify({ method: "ping" }));
+      onEvent({ eventId: `health:heartbeat:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now() });
+    }, 15_000);
+    this.heartbeatTimer.unref();
   }
 }

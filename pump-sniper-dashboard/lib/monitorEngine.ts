@@ -55,6 +55,7 @@ class MonitorEngine extends EventEmitter {
   private heliusRpcUrl?: string;
   private enrichmentInFlight = new Set<string>();
   private lastHeliusPlanWarningAt = 0;
+  private streamEventTimestamps: number[] = [];
 
   constructor() {
     super();
@@ -80,6 +81,11 @@ class MonitorEngine extends EventEmitter {
         wins: 0,
         losses: 0,
         realizedPnlPaper: 0,
+      },
+      streamStats: {
+        receivedSinceStartup: 0,
+        receivedLast60s: 0,
+        lastUpdateAt: Date.now(),
       },
     };
   }
@@ -172,11 +178,17 @@ class MonitorEngine extends EventEmitter {
     this.adapters.forEach((adapter) => this.healthMonitor.update(adapter.getHealth()));
 
     if (event.eventType === "health") {
+      if (event.warning) this.log(event.warning);
       this.updateHealthState();
       return;
     }
 
     if (!event.mintAddress) return;
+    this.streamEventTimestamps.push(Date.now());
+    this.streamEventTimestamps = this.streamEventTimestamps.filter((ts) => Date.now() - ts <= 60_000);
+    this.state.streamStats.receivedSinceStartup += 1;
+    this.state.streamStats.receivedLast60s = this.streamEventTimestamps.length;
+    this.state.streamStats.lastUpdateAt = Date.now();
 
     const candidate = this.validatePumpCandidate(event);
     if (!candidate.ok) {
@@ -287,7 +299,7 @@ class MonitorEngine extends EventEmitter {
 
     const snapshot = this.state.tokens.find((item) => item.mintAddress === token.mintAddress);
     if (snapshot) {
-      this.emitSignalCandidate(snapshot);
+      this.upsertSignalForSnapshot(snapshot);
       if (snapshot.confirmationStatus === "confirmed") {
         this.evaluateSignal(snapshot);
         this.updatePositions(snapshot);
@@ -302,7 +314,6 @@ class MonitorEngine extends EventEmitter {
   private refreshStateFromStore() {
     const tokens = this.store
       .all()
-      .filter((token) => token.pumpPortalTradeCount > 0)
       .filter((token) => Math.floor((Date.now() - token.tokenCreatedAt) / 1000) <= HARD_MAX_TOKEN_AGE_SECONDS)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 120)
@@ -377,6 +388,7 @@ class MonitorEngine extends EventEmitter {
           createdAt: token.createdAt,
           ageSeconds,
           freshness,
+          lastMetricUpdateAt: token.updatedAt,
           price: token.priceUsd !== null ? Number(token.priceUsd.toFixed(8)) : null,
           volumeUsd: token.volumeUsd !== null ? Number(token.volumeUsd.toFixed(2)) : null,
           buysPerSecond,
@@ -428,35 +440,44 @@ class MonitorEngine extends EventEmitter {
     this.emitUpdate();
   }
 
-  private emitSignalCandidate(token: TokenSnapshot) {
-    const recentExists = this.state.signals.some(
-      (signal) => signal.mintAddress === token.mintAddress && Date.now() - signal.createdAt < 10_000,
-    );
-    if (recentExists) return;
+  private upsertSignalForSnapshot(token: TokenSnapshot) {
+    const hasCoreMetrics = token.price !== null && token.volumeUsd !== null && token.riskScore !== null;
+    const category: Signal["category"] =
+      token.sniperReady && hasCoreMetrics ? "trade-ready" : token.parsedTradeCount > 0 ? "watch-candidate" : "discovered";
 
-    const candidate: Signal = {
-      id: crypto.randomUUID(),
+    const reason =
+      category === "trade-ready"
+        ? "trade-ready metrics satisfied"
+        : category === "watch-candidate"
+          ? "parsed trades detected, waiting full metrics"
+          : "newly discovered token";
+
+    const signal: Signal = {
+      id: `${token.mintAddress}:${category}`,
+      category,
       mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
       tokenName: token.name,
       side: "buy",
-      reason: "candidate from live discovery",
-      confidence: 10,
+      reason,
+      confidence: category === "trade-ready" ? Math.max(1, 100 - (token.riskScore ?? 100)) : 10,
       createdAt: Date.now(),
       buysPerSecond: token.buysPerSecond,
       riskScore: token.riskScore,
       volumeUsd: token.volumeUsd,
+      price: token.price,
+      parsedTradeCount: token.parsedTradeCount,
       source: token.source,
       confirmationStatus: token.confirmationStatus,
     };
 
-    this.state.signals = [candidate, ...this.state.signals.filter((entry) => entry.id !== candidate.id)].slice(0, 30);
+    this.state.signals = [signal, ...this.state.signals.filter((entry) => entry.id !== signal.id)].slice(0, 30);
   }
 
   private evaluateSignal(token: TokenSnapshot) {
     const { strategy } = this.state.settings;
     if (!strategy.enabled) return;
-    if (token.buysPerSecond === null || token.volumeUsd === null || token.uniqueWallets === null) return;
+    if (token.price === null || token.buysPerSecond === null || token.volumeUsd === null || token.uniqueWallets === null) return;
 
     this.tradeTimestamps = this.tradeTimestamps.filter((ts) => Date.now() - ts < 3600_000);
 
@@ -477,7 +498,8 @@ class MonitorEngine extends EventEmitter {
     if (!shouldBuy) return;
 
     const signal: Signal = {
-      id: crypto.randomUUID(),
+      id: `${token.mintAddress}:trade-ready-action`,
+      category: "trade-ready",
       mintAddress: token.mintAddress,
       tokenSymbol: token.symbol,
       tokenName: token.name,
@@ -488,6 +510,8 @@ class MonitorEngine extends EventEmitter {
       buysPerSecond: token.buysPerSecond,
       riskScore: token.riskScore ?? null,
       volumeUsd: token.volumeUsd,
+      price: token.price,
+      parsedTradeCount: token.parsedTradeCount,
       source: token.source,
       confirmationStatus: token.confirmationStatus,
     };
