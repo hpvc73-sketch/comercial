@@ -29,7 +29,7 @@ export interface TokenSnapshot {
   ageSeconds: number | null;
   realTokenAgeSeconds: number | null;
   realAgeQuality: "exact" | "estimated" | "unknown";
-  ageSource: "launch" | "pair" | "first-trade" | "on-chain" | "provider" | "estimated" | "unknown";
+  ageSource: "launch" | "first-trade" | "on-chain" | "provider" | "estimated" | "unknown";
   seenByBotAgeSeconds: number;
   freshness: "fresh" | "aging" | "late" | "unknown";
   lastMetricUpdateAt: number;

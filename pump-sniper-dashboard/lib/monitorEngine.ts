@@ -239,7 +239,7 @@ class MonitorEngine extends EventEmitter {
     }
     if (event.pairCreatedAt && event.pairCreatedAt > 0) {
       token.pairCreatedAt = token.pairCreatedAt ? Math.min(token.pairCreatedAt, event.pairCreatedAt) : event.pairCreatedAt;
-      if (!token.tokenCreatedAt || token.pairCreatedAt < token.tokenCreatedAt) token.tokenAgeSource = "pair";
+      if (!token.tokenCreatedAt || token.pairCreatedAt < token.tokenCreatedAt) token.tokenAgeSource = "launch";
       this.log(`age-derivation pair created at ${new Date(token.pairCreatedAt).toISOString()} ${token.mintAddress}`);
     }
 
@@ -680,9 +680,7 @@ class MonitorEngine extends EventEmitter {
     const source: TokenSnapshot["ageSource"] =
       launchCreatedAt !== null
         ? "launch"
-        : token.pairCreatedAt !== null
-          ? "pair"
-          : token.firstTradeAt !== null
+        : token.firstTradeAt !== null
             ? "first-trade"
             : token.tokenCreatedAt !== null
               ? token.tokenAgeSource
@@ -691,9 +689,7 @@ class MonitorEngine extends EventEmitter {
     const createdAt =
       source === "launch"
         ? launchCreatedAt
-        : source === "pair"
-          ? token.pairCreatedAt
-          : source === "first-trade"
+        : source === "first-trade"
             ? token.firstTradeAt
             : source === "on-chain" || source === "provider" || source === "estimated"
               ? token.tokenCreatedAt
@@ -717,7 +713,7 @@ class MonitorEngine extends EventEmitter {
     this.enrichmentInFlight.add(mintAddress);
 
     try {
-      const signatures = await this.callHeliusRpc<{ signature: string }[]>("getSignaturesForAddress", [mintAddress, { limit: 12 }]);
+      const signatures = await this.fetchHistoricalSignatures(mintAddress, 4, 100);
       if (!signatures || signatures.length === 0) {
         token.lifecycle = "discovered";
         return;
@@ -726,8 +722,9 @@ class MonitorEngine extends EventEmitter {
       let earliestBlockTimeMs = Number.POSITIVE_INFINITY;
       const wallets = new Set<string>();
       let parsedTrades = 0;
+      let earliestRelevantSignature: string | null = null;
 
-      for (const sig of signatures.slice(0, 8)) {
+      for (const sig of signatures) {
         const tx = await this.callHeliusRpc<Record<string, unknown> | null>("getTransaction", [
           sig.signature,
           { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" },
@@ -742,6 +739,7 @@ class MonitorEngine extends EventEmitter {
         const touchesMint = tokenBalances.some((entry) => entry?.mint === mintAddress);
         if (!touchesMint) continue;
 
+        if (!earliestRelevantSignature) earliestRelevantSignature = sig.signature;
         parsedTrades += 1;
         for (const balance of tokenBalances) {
           if (balance?.mint !== mintAddress) continue;
@@ -750,13 +748,25 @@ class MonitorEngine extends EventEmitter {
         }
       }
 
+      if (!earliestRelevantSignature) {
+        const txHistory = await this.tryGetTransactionsForAddress(mintAddress);
+        for (const tx of txHistory) {
+          const blockTime = typeof tx.blockTime === "number" ? tx.blockTime * 1000 : undefined;
+          if (blockTime && blockTime < earliestBlockTimeMs) earliestBlockTimeMs = blockTime;
+        }
+      } else {
+        this.log(`age-derivation earliest relevant signature ${earliestRelevantSignature} ${mintAddress}`);
+      }
+
       if (Number.isFinite(earliestBlockTimeMs)) {
         token.tokenCreatedAt = token.tokenCreatedAt ? Math.min(token.tokenCreatedAt, earliestBlockTimeMs) : earliestBlockTimeMs;
         token.tokenAgeSource = "on-chain";
+        this.log(`age-derivation token created at ${new Date(token.tokenCreatedAt).toISOString()} source=on-chain ${mintAddress}`);
       }
       if (parsedTrades > 0) {
         token.parsedTradeCount = parsedTrades;
         wallets.forEach((wallet) => token.buyerWallets.add(wallet));
+        if (!token.firstTradeAt && Number.isFinite(earliestBlockTimeMs)) token.firstTradeAt = earliestBlockTimeMs;
         token.lifecycle = "enriched";
         this.log(`helius enriched ${mintAddress}: parsedTrades=${parsedTrades}, wallets=${wallets.size}`);
       } else {
@@ -790,6 +800,37 @@ class MonitorEngine extends EventEmitter {
     if (data.error) throw new Error(data.error.message ?? "rpc error");
     if (data.result === undefined) throw new Error("empty rpc result");
     return data.result;
+  }
+
+  private async fetchHistoricalSignatures(mintAddress: string, pages: number, pageSize: number) {
+    const all: Array<{ signature: string }> = [];
+    let before: string | undefined;
+
+    for (let i = 0; i < pages; i += 1) {
+      const page = await this.callHeliusRpc<Array<{ signature: string }>>("getSignaturesForAddress", [
+        mintAddress,
+        { limit: pageSize, before },
+      ]);
+      if (!page || page.length === 0) break;
+      all.push(...page);
+      before = page[page.length - 1]?.signature;
+      if (!before) break;
+    }
+
+    return all.reverse();
+  }
+
+  private async tryGetTransactionsForAddress(mintAddress: string): Promise<Array<Record<string, unknown>>> {
+    try {
+      const result = await this.callHeliusRpc<Array<Record<string, unknown>>>("getTransactionsForAddress", [
+        mintAddress,
+        { limit: 30 },
+      ]);
+      this.log(`age-derivation used getTransactionsForAddress fallback ${mintAddress}`);
+      return result ?? [];
+    } catch {
+      return [];
+    }
   }
 
   private log(message: string) {

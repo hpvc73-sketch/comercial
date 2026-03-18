@@ -12,7 +12,7 @@ export interface LiveTokenState {
   tokenCreatedAt: number | null;
   pairCreatedAt: number | null;
   firstTradeAt: number | null;
-  tokenAgeSource: "launch" | "pair" | "first-trade" | "on-chain" | "provider" | "estimated" | "unknown";
+  tokenAgeSource: "launch" | "first-trade" | "on-chain" | "provider" | "estimated" | "unknown";
   updatedAt: number;
   priceUsd: number | null;
   volumeUsd: number | null;
@@ -60,7 +60,7 @@ export class LiveStateStore {
       tokenCreatedAt: defaults.tokenCreatedAt ?? null,
       pairCreatedAt: defaults.pairCreatedAt ?? null,
       firstTradeAt: null,
-      tokenAgeSource: defaults.tokenCreatedAt ? "provider" : defaults.pairCreatedAt ? "pair" : "unknown",
+      tokenAgeSource: defaults.tokenCreatedAt ? "provider" : defaults.pairCreatedAt ? "launch" : "unknown",
       updatedAt: defaults.timestamp,
       priceUsd: defaults.priceUsd ?? null,
       volumeUsd: defaults.volumeUsd ?? null,
