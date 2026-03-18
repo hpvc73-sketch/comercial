@@ -167,6 +167,8 @@ export default function HomePage() {
             <th align="left">Wallets</th>
             <th align="left">Concentração</th>
             <th align="left">Risco</th>
+            <th align="left">Fonte</th>
+            <th align="left">Estado</th>
           </tr>
         </thead>
         <tbody>
@@ -200,6 +202,8 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{token.uniqueWallets}</td>
       <td>{token.topWalletShare.toFixed(1)}%</td>
       <td>{token.riskScore.toFixed(1)}</td>
+      <td><span className="badge-source">{token.source}</span></td>
+      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.discoveryStatus} · {token.confirmationStatus}</span></td>
     </tr>
   );
 }
@@ -223,7 +227,7 @@ function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSig
                 {signal.mintAddress}
               </a>
               <div style={{ marginTop: 4, fontSize: 13 }}>
-                buys/s <strong>{signal.buysPerSecond.toFixed(2)}</strong> · risco <strong>{signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong>
+                buys/s <strong>{signal.buysPerSecond.toFixed(2)}</strong> · risco <strong>{signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
               </div>
             </li>
           );

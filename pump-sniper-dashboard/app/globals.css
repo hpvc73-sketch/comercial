@@ -22,3 +22,7 @@ a:hover { color: #bfdbfe; text-decoration: underline; }
   from { background: #164e63; }
   to { background: #111827; }
 }
+
+.badge-source { background: #1e293b; color: #cbd5e1; padding: 3px 8px; border-radius: 999px; font-size: 12px; }
+.badge-confirmed { background: #14532d; color: #dcfce7; padding: 3px 8px; border-radius: 999px; font-size: 12px; }
+.badge-unconfirmed { background: #7c2d12; color: #ffedd5; padding: 3px 8px; border-radius: 999px; font-size: 12px; }

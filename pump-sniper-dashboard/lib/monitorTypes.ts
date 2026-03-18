@@ -8,6 +8,9 @@ export interface RiskFactors {
 
 export interface TokenSnapshot {
   mintAddress: string;
+  source: "pumpportal" | "solana-rpc" | "helius-grpc";
+  discoveryStatus: "discovered" | "migrated" | "stale";
+  confirmationStatus: "unconfirmed" | "confirmed";
   symbol: string;
   name: string;
   createdAt: number;
@@ -26,6 +29,8 @@ export interface TokenSnapshot {
 export interface Signal {
   id: string;
   mintAddress: string;
+  source: "pumpportal" | "solana-rpc" | "helius-grpc";
+  confirmationStatus: "unconfirmed" | "confirmed";
   tokenSymbol: string;
   tokenName: string;
   side: "buy" | "sell";

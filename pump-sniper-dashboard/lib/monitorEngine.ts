@@ -1,6 +1,13 @@
 import { EventEmitter } from "node:events";
 import { canTradeByCooldown, computeRiskScore } from "./monitorMath";
 import { MonitorSettings, MonitorState, Position, Signal, TokenSnapshot, TradeResult } from "./monitorTypes";
+import { EventDeduplicator } from "./ingestion/deduplicator";
+import { HealthMonitor } from "./ingestion/healthMonitor";
+import { LiveStateStore } from "./ingestion/liveStateStore";
+import { PumpPortalAdapter } from "./ingestion/adapters/pumpPortalAdapter";
+import { SolanaRpcAdapter } from "./ingestion/adapters/solanaRpcAdapter";
+import { HeliusGrpcAdapter } from "./ingestion/adapters/heliusGrpcAdapter";
+import { SourceAdapter, UnifiedTokenEvent } from "./ingestion/types";
 
 const DEFAULT_SETTINGS: MonitorSettings = {
   paperBankrollUsd: 5000,
@@ -18,43 +25,26 @@ const DEFAULT_SETTINGS: MonitorSettings = {
   },
 };
 
-type TokenRuntime = {
-  token: TokenSnapshot;
-  buyTimestamps: number[];
-  knownWallets: Set<string>;
-  updatedAt: number;
-};
-
-function safeNumber(value: unknown, fallback = 0): number {
-  const num = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
-
-function safeString(value: unknown, fallback = ""): string {
-  return typeof value === "string" && value.trim() ? value : fallback;
-}
-
-function looksLikeMint(value: string): boolean {
-  return value.length >= 32 && value.length <= 64;
-}
-
 class MonitorEngine extends EventEmitter {
   private state: MonitorState;
-  private ws: WebSocket | null = null;
-  private reconnectTimer?: NodeJS.Timeout;
-  private heartbeatTimer?: NodeJS.Timeout;
+  private dedup = new EventDeduplicator(45_000);
+  private healthMonitor = new HealthMonitor();
+  private store = new LiveStateStore();
+  private adapters: SourceAdapter[] = [];
 
-  private tokenRuntime = new Map<string, TokenRuntime>();
   private cooldownByMint = new Map<string, number>();
   private tradeTimestamps: number[] = [];
 
+  private staleTimer?: NodeJS.Timeout;
+
   constructor() {
     super();
+
     this.state = {
       connected: false,
       lastEventAt: Date.now(),
       dataMode: "unavailable",
-      dataWarning: "A ligar ao feed live de Pump.fun/Solana...",
+      dataWarning: "A ligar às fontes live...",
       tokens: [],
       signals: [],
       positions: [],
@@ -78,8 +68,22 @@ class MonitorEngine extends EventEmitter {
   }
 
   start() {
-    if (this.ws) return;
-    this.connectLiveFeed();
+    if (this.adapters.length > 0) return;
+
+    const solanaWs = process.env.SOLANA_RPC_WS_URL ?? "wss://api.mainnet-beta.solana.com";
+    const heliusWs = process.env.HELIUS_GRPC_WS_URL;
+
+    const pumpPortal = new PumpPortalAdapter();
+    const solanaRpc = new SolanaRpcAdapter(solanaWs);
+    const helius = new HeliusGrpcAdapter(heliusWs);
+
+    this.adapters = [pumpPortal, solanaRpc, helius];
+    this.adapters.forEach((adapter) => adapter.start((event) => this.onUnifiedEvent(event)));
+
+    this.staleTimer = setInterval(() => this.markStaleTokens(), 15_000);
+    this.staleTimer.unref();
+
+    this.log("Ingestão multi-source iniciada (pumpportal + solana-rpc + helius-grpc opcional)");
   }
 
   updateSettings(next: Partial<MonitorSettings>) {
@@ -89,226 +93,134 @@ class MonitorEngine extends EventEmitter {
       strategy: { ...this.state.settings.strategy, ...next.strategy },
     };
 
-    if (typeof next.paperBankrollUsd === "number") {
-      this.state.balances.paperUsd = next.paperBankrollUsd;
-    }
+    if (typeof next.paperBankrollUsd === "number") this.state.balances.paperUsd = next.paperBankrollUsd;
 
     this.log("Configuração atualizada");
     this.emitUpdate();
   }
 
-  private connectLiveFeed() {
-    try {
-      this.log("A ligar websocket live: wss://pumpportal.fun/api/data");
-      this.state.dataMode = "unavailable";
-      this.state.dataWarning = "A ligar ao feed live...";
-      this.emitUpdate();
+  private onUnifiedEvent(event: UnifiedTokenEvent) {
+    if (this.dedup.isDuplicate(event.eventId)) return;
 
-      this.ws = new WebSocket("wss://pumpportal.fun/api/data");
+    this.adapters.forEach((adapter) => this.healthMonitor.update(adapter.getHealth()));
 
-      this.ws.addEventListener("open", () => {
-        this.state.connected = true;
-        this.state.dataMode = "live";
-        this.state.dataWarning = undefined;
-        this.log("Feed LIVE ligado.");
-
-        this.ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
-        this.ws?.send(JSON.stringify({ method: "subscribeMigration" }));
-
-        this.setupHeartbeat();
-        this.emitUpdate();
-      });
-
-      this.ws.addEventListener("message", (event) => {
-        const raw = typeof event.data === "string" ? event.data : "";
-        if (!raw) return;
-
-        let payload: Record<string, unknown>;
-        try {
-          payload = JSON.parse(raw) as Record<string, unknown>;
-        } catch {
-          return;
-        }
-
-        this.processLivePayload(payload);
-      });
-
-      this.ws.addEventListener("close", () => {
-        this.log("Feed LIVE desligado, a tentar reconectar...");
-        this.state.connected = false;
-        this.state.dataMode = "unavailable";
-        this.state.dataWarning = "Sem ligação ao feed live. Nenhum token simulado será criado.";
-        this.cleanupConnection();
-        this.scheduleReconnect();
-        this.emitUpdate();
-      });
-
-      this.ws.addEventListener("error", () => {
-        this.log("Erro no websocket do feed LIVE.");
-      });
-    } catch (error) {
-      this.log(`Falha ao ligar feed live: ${(error as Error).message}`);
-      this.state.dataMode = "unavailable";
-      this.state.dataWarning = "Falha de ligação ao feed live. Nenhum token simulado será criado.";
-      this.scheduleReconnect();
-      this.emitUpdate();
-    }
-  }
-
-  private scheduleReconnect() {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = undefined;
-      this.connectLiveFeed();
-    }, 3000);
-    this.reconnectTimer.unref();
-  }
-
-  private setupHeartbeat() {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-
-    this.heartbeatTimer = setInterval(() => {
-      const staleMs = Date.now() - this.state.lastEventAt;
-      if (staleMs > 20_000) {
-        this.state.dataWarning = "Feed live sem eventos recentes. A aguardar novos dados reais.";
-        this.emitUpdate();
-      }
-    }, 5000);
-    this.heartbeatTimer.unref();
-  }
-
-  private cleanupConnection() {
-    this.ws = null;
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = undefined;
-    }
-  }
-
-  private processLivePayload(payload: Record<string, unknown>) {
-    const mintAddress = this.extractMintAddress(payload);
-    if (!mintAddress) return;
-
-    const symbol = safeString(payload.symbol, safeString(payload.ticker, "UNKNOWN"));
-    const name = safeString(payload.name, symbol || "Unknown Token");
-    const txType = safeString(payload.txType, safeString(payload.type, ""));
-
-    const runtime = this.getOrCreateTokenRuntime(mintAddress, symbol, name, payload);
-
-    const solAmount = safeNumber(payload.solAmount, safeNumber(payload.sol_amount, 0));
-    const usdAmount = safeNumber(payload.usdAmount, solAmount * 170);
-    const tokenAmount = safeNumber(payload.tokenAmount, safeNumber(payload.token_amount, 0));
-    const wallet = safeString(payload.traderPublicKey, safeString(payload.user, safeString(payload.owner, "")));
-
-    runtime.token.symbol = symbol || runtime.token.symbol;
-    runtime.token.name = name || runtime.token.name;
-
-    // price fallback based on trade amounts; keep previous price if cannot infer.
-    if (solAmount > 0 && tokenAmount > 0) {
-      const price = usdAmount > 0 ? usdAmount / tokenAmount : (solAmount * 170) / tokenAmount;
-      if (Number.isFinite(price) && price > 0) runtime.token.price = Number(price.toFixed(8));
+    if (event.eventType === "health") {
+      this.updateHealthState();
+      return;
     }
 
-    if (usdAmount > 0) runtime.token.volumeUsd = Number((runtime.token.volumeUsd + usdAmount).toFixed(2));
+    if (!event.mintAddress) return;
 
-    if (wallet) runtime.knownWallets.add(wallet);
-    runtime.token.uniqueWallets = Math.max(runtime.token.uniqueWallets, runtime.knownWallets.size);
+    const token = this.store.getOrCreate(event.mintAddress, {
+      source: event.source,
+      timestamp: event.timestamp,
+      symbol: event.symbol,
+      name: event.name,
+      discoveryStatus: event.discoveryStatus,
+      confirmationStatus: event.confirmationStatus,
+      priceUsd: event.priceUsd,
+      volumeUsd: event.volumeUsd,
+    });
 
-    if (txType.toLowerCase().includes("buy")) {
-      runtime.buyTimestamps.push(Date.now());
+    token.updatedAt = event.timestamp;
+    if (event.symbol) token.symbol = event.symbol;
+    if (event.name) token.name = event.name;
+    token.source = event.source;
+
+    if (event.discoveryStatus) token.discoveryStatus = event.discoveryStatus;
+    if (event.eventType === "migrated") token.discoveryStatus = "migrated";
+
+    if (event.confirmationStatus === "confirmed" || event.eventType === "confirmed") token.confirmationStatus = "confirmed";
+
+    if (event.volumeUsd) token.volumeUsd += event.volumeUsd;
+    if (event.priceUsd && event.priceUsd > 0) token.priceUsd = event.priceUsd;
+    if (event.buysDelta) {
+      token.buys += event.buysDelta;
+      token.buyTimestamps.push(event.timestamp);
     }
-
-    if (txType.toLowerCase().includes("sell")) {
-      runtime.token.dumpEvents += 1;
-    }
+    if (event.sellsDelta) token.sells += event.sellsDelta;
+    if (event.trader) token.traders.add(event.trader);
 
     const cutoff = Date.now() - 10_000;
-    runtime.buyTimestamps = runtime.buyTimestamps.filter((ts) => ts >= cutoff);
-    runtime.token.buysPerSecond = Number((runtime.buyTimestamps.length / 10).toFixed(2));
+    token.buyTimestamps = token.buyTimestamps.filter((ts) => ts >= cutoff);
 
-    runtime.token.ageSeconds = Math.max(0, Math.floor((Date.now() - runtime.token.createdAt) / 1000));
-    runtime.token.curveSlope = Number((runtime.token.buysPerSecond * 1.4 - runtime.token.dumpEvents * 0.8).toFixed(2));
+    // Register on-chain confirmation watchers for discovered tokens.
+    if (token.confirmationStatus !== "confirmed") {
+      this.adapters.forEach((adapter) => adapter.registerMint?.(token.mintAddress));
+    }
 
-    runtime.token.riskFactors = {
-      buySpeed: Math.max(0, 100 - runtime.token.buysPerSecond * 12),
-      walletConcentration: Math.min(100, Math.max(10, 85 - runtime.token.uniqueWallets / 3)),
-      curveBehavior: Math.min(100, Math.max(0, 50 - runtime.token.curveSlope * 3)),
-      earlyVolume: Math.max(0, 100 - runtime.token.volumeUsd / 400),
-      earlyDumpSignals: Math.min(100, runtime.token.dumpEvents * 15),
-    };
-    runtime.token.riskScore = computeRiskScore(runtime.token.riskFactors);
+    this.refreshStateFromStore();
 
-    runtime.updatedAt = Date.now();
-    this.tokenRuntime.set(mintAddress, runtime);
-
-    this.state.tokens = Array.from(this.tokenRuntime.values())
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((item) => item.token)
-      .slice(0, 120);
-
-    this.evaluateSignal(runtime.token);
-    this.updatePositions(runtime.token);
+    const snapshot = this.state.tokens.find((item) => item.mintAddress === token.mintAddress);
+    if (snapshot?.confirmationStatus === "confirmed") {
+      this.evaluateSignal(snapshot);
+      this.updatePositions(snapshot);
+    }
 
     this.state.lastEventAt = Date.now();
-    this.state.dataMode = "live";
-    this.state.dataWarning = undefined;
+    this.updateHealthState();
     this.emitUpdate();
   }
 
-  private getOrCreateTokenRuntime(
-    mintAddress: string,
-    symbol: string,
-    name: string,
-    payload: Record<string, unknown>,
-  ): TokenRuntime {
-    const existing = this.tokenRuntime.get(mintAddress);
-    if (existing) return existing;
+  private refreshStateFromStore() {
+    const tokens = this.store
+      .all()
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 120)
+      .map<TokenSnapshot>((token) => {
+        const buysPerSecond = Number((token.buyTimestamps.length / 10).toFixed(2));
+        const curveSlope = Number((buysPerSecond * 1.2 - token.sells * 0.4).toFixed(2));
+        const riskFactors = {
+          buySpeed: Math.max(0, 100 - buysPerSecond * 12),
+          walletConcentration: Math.min(100, Math.max(10, 90 - token.traders.size / 2)),
+          curveBehavior: Math.min(100, Math.max(0, 50 - curveSlope * 3)),
+          earlyVolume: Math.max(0, 100 - token.volumeUsd / 400),
+          earlyDumpSignals: Math.min(100, token.sells * 10),
+        };
 
-    const firstPrice = safeNumber(payload.priceUsd, safeNumber(payload.price, 0));
-    const now = Date.now();
+        return {
+          mintAddress: token.mintAddress,
+          source: token.source,
+          discoveryStatus: token.discoveryStatus,
+          confirmationStatus: token.confirmationStatus,
+          symbol: token.symbol,
+          name: token.name,
+          createdAt: token.createdAt,
+          ageSeconds: Math.floor((Date.now() - token.createdAt) / 1000),
+          price: Number((token.priceUsd || 0.0000001).toFixed(8)),
+          volumeUsd: Number(token.volumeUsd.toFixed(2)),
+          buysPerSecond,
+          uniqueWallets: token.traders.size,
+          topWalletShare: Math.max(0, Math.min(100, 100 / Math.max(1, token.traders.size / 3))),
+          curveSlope,
+          dumpEvents: token.sells,
+          riskFactors,
+          riskScore: computeRiskScore(riskFactors),
+        };
+      });
 
-    const created: TokenRuntime = {
-      token: {
-        mintAddress,
-        symbol: symbol || "UNKNOWN",
-        name: name || symbol || "Unknown Token",
-        createdAt: now,
-        ageSeconds: 0,
-        price: firstPrice > 0 ? firstPrice : 0.000001,
-        volumeUsd: 0,
-        buysPerSecond: 0,
-        uniqueWallets: 0,
-        topWalletShare: 0,
-        curveSlope: 0,
-        dumpEvents: 0,
-        riskFactors: {
-          buySpeed: 50,
-          walletConcentration: 50,
-          curveBehavior: 50,
-          earlyVolume: 50,
-          earlyDumpSignals: 50,
-        },
-        riskScore: 50,
-      },
-      buyTimestamps: [],
-      knownWallets: new Set<string>(),
-      updatedAt: now,
-    };
-
-    return created;
+    this.state.tokens = tokens;
   }
 
-  private extractMintAddress(payload: Record<string, unknown>): string | null {
-    const candidates = [
-      safeString(payload.mint),
-      safeString(payload.mintAddress),
-      safeString(payload.tokenAddress),
-      safeString(payload.ca),
-      safeString(payload.address),
-    ];
+  private updateHealthState() {
+    const health = this.healthMonitor.snapshot();
+    const liveConnected = health.some((entry) => entry.connected && entry.source === "pumpportal");
+    const premiumConnected = health.some((entry) => entry.connected && entry.source === "helius-grpc");
 
-    const mint = candidates.find((candidate) => looksLikeMint(candidate));
-    return mint || null;
+    this.state.connected = health.some((entry) => entry.connected);
+    this.state.dataMode = liveConnected || premiumConnected ? "live" : "unavailable";
+    this.state.dataWarning = this.healthMonitor.combinedWarning();
+  }
+
+  private markStaleTokens() {
+    const staleCutoff = Date.now() - 120_000;
+    for (const token of this.store.all()) {
+      if (token.updatedAt < staleCutoff && token.discoveryStatus !== "migrated") {
+        token.discoveryStatus = "stale";
+      }
+    }
+    this.refreshStateFromStore();
+    this.emitUpdate();
   }
 
   private evaluateSignal(token: TokenSnapshot) {
@@ -341,6 +253,8 @@ class MonitorEngine extends EventEmitter {
       buysPerSecond: token.buysPerSecond,
       riskScore: token.riskScore,
       volumeUsd: token.volumeUsd,
+      source: token.source,
+      confirmationStatus: token.confirmationStatus,
     };
 
     this.state.signals = [signal, ...this.state.signals.filter((entry) => entry.id !== signal.id)].slice(0, 30);
@@ -354,10 +268,7 @@ class MonitorEngine extends EventEmitter {
 
   private openPaperPosition(token: TokenSnapshot, reason: string) {
     const size = this.state.settings.strategy.entryUsdSize;
-    if (this.state.balances.paperUsd < size) {
-      this.log(`Saldo paper insuficiente: ${token.symbol}`);
-      return;
-    }
+    if (this.state.balances.paperUsd < size) return;
 
     const quantity = size / Math.max(token.price, 0.0000001);
     const position: Position = {
@@ -393,19 +304,15 @@ class MonitorEngine extends EventEmitter {
   }
 
   private updatePositions(token: TokenSnapshot) {
-    const toClose: Position[] = [];
-
-    for (const position of this.state.positions) {
-      if (position.mintAddress !== token.mintAddress) continue;
+    const toClose = this.state.positions.filter((position) => {
+      if (position.mintAddress !== token.mintAddress) return false;
       position.highestPrice = Math.max(position.highestPrice, token.price);
-
       if (position.trailingStopPct) {
         const trailing = position.highestPrice * (1 - position.trailingStopPct / 100);
         position.stopLoss = Math.max(position.stopLoss, trailing);
       }
-
-      if (token.price <= position.stopLoss || token.price >= position.takeProfit) toClose.push(position);
-    }
+      return token.price <= position.stopLoss || token.price >= position.takeProfit;
+    });
 
     toClose.forEach((position) => this.closePosition(position, token));
   }
