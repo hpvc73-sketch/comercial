@@ -7,16 +7,61 @@ function fmtUsd(n: number) {
   return n.toLocaleString("pt-PT", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 }
 
+async function fetchState(): Promise<MonitorState> {
+  const res = await fetch("/api/monitor/state", { cache: "no-store" });
+  if (!res.ok) throw new Error("Falha ao carregar estado inicial");
+  return res.json();
+}
+
 export default function HomePage() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [riskFilter, setRiskFilter] = useState(70);
+  const [status, setStatus] = useState<"connecting" | "connected" | "fallback">("connecting");
 
   useEffect(() => {
+    let mounted = true;
+    let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+
+    fetchState()
+      .then((next) => {
+        if (mounted) setState(next);
+      })
+      .catch(() => {
+        // ignore; SSE/fallback below
+      });
+
     const events = new EventSource("/api/monitor/events");
+    events.onopen = () => {
+      if (mounted) setStatus("connected");
+      if (fallbackTimer) {
+        clearInterval(fallbackTimer);
+        fallbackTimer = null;
+      }
+    };
     events.onmessage = (event) => {
+      if (!mounted) return;
       setState(JSON.parse(event.data));
     };
-    return () => events.close();
+    events.onerror = () => {
+      if (!mounted) return;
+      setStatus("fallback");
+      if (!fallbackTimer) {
+        fallbackTimer = setInterval(async () => {
+          try {
+            const next = await fetchState();
+            if (mounted) setState(next);
+          } catch {
+            // keep trying
+          }
+        }, 2000);
+      }
+    };
+
+    return () => {
+      mounted = false;
+      events.close();
+      if (fallbackTimer) clearInterval(fallbackTimer);
+    };
   }, []);
 
   const filteredTokens = useMemo(() => {
@@ -55,17 +100,29 @@ export default function HomePage() {
     });
   }
 
-  if (!state) return <main className="p-8 text-white">A ligar ao stream...</main>;
+  if (!state) {
+    return (
+      <main className="mx-auto max-w-7xl p-6">
+        <h1 className="mb-2 text-3xl font-bold">Pump.fun Monitor</h1>
+        <p className="text-slate-300">A ligar ao stream de monitorização...</p>
+      </main>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-slate-950 p-6 text-slate-100">
-      <h1 className="mb-4 text-3xl font-bold">Pump.fun Monitor + Paper/Real Trading</h1>
+    <main className="mx-auto min-h-screen max-w-7xl p-6">
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-3xl font-bold">Pump.fun Monitor + Paper/Real Trading</h1>
+        <span className={`rounded px-2 py-1 text-xs ${status === "connected" ? "bg-emerald-700" : "bg-amber-700"}`}>
+          {status === "connected" ? "Tempo real (SSE)" : "Fallback polling"}
+        </span>
+      </div>
 
       <section className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Card title="Saldo virtual" value={fmtUsd(state.balances.paperUsd)} />
         <Card title="PnL diário paper" value={fmtUsd(state.metrics.realizedPnlPaper)} />
         <Card title="Sinais hoje" value={String(state.metrics.totalSignals)} />
-        <Card title="Taxa acerto" value={`${state.metrics.wins}/${state.metrics.losses}`} />
+        <Card title="Trades reais hoje" value={String(state.metrics.realTrades)} />
       </section>
 
       <section className="mb-6 rounded-lg border border-slate-800 bg-slate-900 p-4">
@@ -120,8 +177,9 @@ export default function HomePage() {
         </table>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-2">
+      <section className="grid gap-4 md:grid-cols-3">
         <Panel title="Histórico de sinais" items={state.signals.slice(0, 15).map((s) => `${s.tokenSymbol} ${s.side.toUpperCase()} • ${s.reason}`)} />
+        <Panel title="Histórico de trades" items={state.tradeHistory.slice(0, 15).map((t) => `${t.mode.toUpperCase()} ${t.side.toUpperCase()} ${t.tokenSymbol} @ ${t.price.toFixed(6)} | PnL ${fmtUsd(t.pnlUsd)}`)} />
         <Panel title="Logs" items={state.logs.slice(0, 15)} />
       </section>
     </main>

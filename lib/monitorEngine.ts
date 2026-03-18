@@ -260,7 +260,7 @@ class MonitorEngine extends EventEmitter {
       const dynamicImport = new Function("m", "return import(m)") as (m: string) => Promise<unknown>;
       await dynamicImport("@pump-fun/sdk").catch(() => null);
 
-      const web3 = await dynamicImport("@solana/web3").catch(() => null) as
+      const web3 = await dynamicImport("@solana/web3.js").catch(() => null) as
         | { Keypair: { fromSecretKey: (key: Uint8Array) => { publicKey: { toBase58: () => string } } }; Connection: new (url: string, commitment: string) => { getLatestBlockhash: () => Promise<unknown> } }
         | null;
 
