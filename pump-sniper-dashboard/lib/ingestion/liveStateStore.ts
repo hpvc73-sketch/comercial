@@ -14,6 +14,7 @@ export interface LiveTokenState {
   buys: number;
   sells: number;
   traders: Set<string>;
+  traderVolumeUsd: Map<string, number>;
   buyTimestamps: number[];
 }
 
@@ -38,6 +39,7 @@ export class LiveStateStore {
       buys: 0,
       sells: 0,
       traders: new Set<string>(),
+      traderVolumeUsd: new Map<string, number>(),
       buyTimestamps: [],
     };
 

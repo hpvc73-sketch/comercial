@@ -36,6 +36,7 @@ class MonitorEngine extends EventEmitter {
   private tradeTimestamps: number[] = [];
 
   private staleTimer?: NodeJS.Timeout;
+  private lastDebugLogAt = 0;
 
   constructor() {
     super();
@@ -139,7 +140,11 @@ class MonitorEngine extends EventEmitter {
       token.buyTimestamps.push(event.timestamp);
     }
     if (event.sellsDelta) token.sells += event.sellsDelta;
-    if (event.trader) token.traders.add(event.trader);
+    if (event.trader) {
+      token.traders.add(event.trader);
+      const current = token.traderVolumeUsd.get(event.trader) ?? 0;
+      token.traderVolumeUsd.set(event.trader, current + (event.volumeUsd ?? 0));
+    }
 
     const cutoff = Date.now() - 10_000;
     token.buyTimestamps = token.buyTimestamps.filter((ts) => ts >= cutoff);
@@ -170,13 +175,27 @@ class MonitorEngine extends EventEmitter {
       .map<TokenSnapshot>((token) => {
         const buysPerSecond = Number((token.buyTimestamps.length / 10).toFixed(2));
         const curveSlope = Number((buysPerSecond * 1.2 - token.sells * 0.4).toFixed(2));
-        const riskFactors = {
-          buySpeed: Math.max(0, 100 - buysPerSecond * 12),
-          walletConcentration: Math.min(100, Math.max(10, 90 - token.traders.size / 2)),
-          curveBehavior: Math.min(100, Math.max(0, 50 - curveSlope * 3)),
-          earlyVolume: Math.max(0, 100 - token.volumeUsd / 400),
-          earlyDumpSignals: Math.min(100, token.sells * 10),
-        };
+
+        const totalTraderVolume = Array.from(token.traderVolumeUsd.values()).reduce((sum, value) => sum + value, 0);
+        const topTraderVolume = token.traderVolumeUsd.size > 0 ? Math.max(...token.traderVolumeUsd.values()) : 0;
+
+        const hasConcentrationData = totalTraderVolume > 0 && token.traderVolumeUsd.size >= 2;
+        const topWalletShare = hasConcentrationData
+          ? Number(((topTraderVolume / totalTraderVolume) * 100).toFixed(2))
+          : null;
+
+        const hasRiskInputs = token.volumeUsd > 0 && token.traders.size >= 2 && token.buyTimestamps.length > 0;
+        const riskFactors = hasRiskInputs
+          ? {
+              buySpeed: Math.max(0, 100 - buysPerSecond * 12),
+              walletConcentration: topWalletShare ?? 50,
+              curveBehavior: Math.min(100, Math.max(0, 50 - curveSlope * 3)),
+              earlyVolume: Math.max(0, 100 - token.volumeUsd / 400),
+              earlyDumpSignals: Math.min(100, token.sells * 10),
+            }
+          : null;
+
+        const riskScore = riskFactors ? computeRiskScore(riskFactors) : null;
 
         return {
           mintAddress: token.mintAddress,
@@ -187,19 +206,27 @@ class MonitorEngine extends EventEmitter {
           name: token.name,
           createdAt: token.createdAt,
           ageSeconds: Math.floor((Date.now() - token.createdAt) / 1000),
-          price: Number((token.priceUsd || 0.0000001).toFixed(8)),
+          price: Number((token.priceUsd || 0).toFixed(8)),
           volumeUsd: Number(token.volumeUsd.toFixed(2)),
           buysPerSecond,
           uniqueWallets: token.traders.size,
-          topWalletShare: Math.max(0, Math.min(100, 100 / Math.max(1, token.traders.size / 3))),
+          topWalletShare,
           curveSlope,
           dumpEvents: token.sells,
           riskFactors,
-          riskScore: computeRiskScore(riskFactors),
+          riskScore,
         };
       });
 
     this.state.tokens = tokens;
+
+    if (tokens.length >= 2 && Date.now() - this.lastDebugLogAt > 20_000) {
+      this.lastDebugLogAt = Date.now();
+      const [a, b] = tokens;
+      this.log(
+        `DEBUG metrics ${a.symbol}:${a.mintAddress.slice(0, 6)} risk=${a.riskScore ?? "N/A"} conc=${a.topWalletShare ?? "N/A"} | ${b.symbol}:${b.mintAddress.slice(0, 6)} risk=${b.riskScore ?? "N/A"} conc=${b.topWalletShare ?? "N/A"}`,
+      );
+    }
   }
 
   private updateHealthState() {
@@ -234,6 +261,7 @@ class MonitorEngine extends EventEmitter {
 
     const shouldBuy =
       token.buysPerSecond >= strategy.minBuysPerSecond &&
+      token.riskScore !== null &&
       token.riskScore <= strategy.maxRiskScore &&
       token.volumeUsd >= strategy.minVolumeUsd &&
       !isCooldown &&
@@ -247,11 +275,11 @@ class MonitorEngine extends EventEmitter {
       tokenSymbol: token.symbol,
       tokenName: token.name,
       side: "buy",
-      reason: `buy/s ${token.buysPerSecond.toFixed(2)}, risco ${token.riskScore.toFixed(0)}, vol ${token.volumeUsd.toFixed(0)}`,
-      confidence: Math.max(1, 100 - token.riskScore),
+      reason: `buy/s ${token.buysPerSecond.toFixed(2)}, risco ${(token.riskScore ?? 0).toFixed(0)}, vol ${token.volumeUsd.toFixed(0)}`,
+      confidence: Math.max(1, 100 - (token.riskScore ?? 100)),
       createdAt: Date.now(),
       buysPerSecond: token.buysPerSecond,
-      riskScore: token.riskScore,
+      riskScore: token.riskScore ?? null,
       volumeUsd: token.volumeUsd,
       source: token.source,
       confirmationStatus: token.confirmationStatus,

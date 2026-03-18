@@ -91,7 +91,7 @@ export default function HomePage() {
 
   const filteredTokens = useMemo(() => {
     if (!state) return [];
-    return state.tokens.filter((token) => token.riskScore <= riskFilter).slice(0, 30);
+    return state.tokens.filter((token) => token.riskScore !== null && token.riskScore <= riskFilter).slice(0, 30);
   }, [state, riskFilter]);
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
@@ -200,8 +200,8 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
       <td>{fmtUsd(token.volumeUsd)}</td>
       <td>{token.buysPerSecond.toFixed(2)}</td>
       <td>{token.uniqueWallets}</td>
-      <td>{token.topWalletShare.toFixed(1)}%</td>
-      <td>{token.riskScore.toFixed(1)}</td>
+      <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
+      <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
       <td><span className="badge-source">{token.source}</span></td>
       <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.discoveryStatus} · {token.confirmationStatus}</span></td>
     </tr>
@@ -227,7 +227,7 @@ function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSig
                 {signal.mintAddress}
               </a>
               <div style={{ marginTop: 4, fontSize: 13 }}>
-                buys/s <strong>{signal.buysPerSecond.toFixed(2)}</strong> · risco <strong>{signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
+                buys/s <strong>{signal.buysPerSecond.toFixed(2)}</strong> · risco <strong>{signal.riskScore === null ? "N/A" : signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
               </div>
             </li>
           );

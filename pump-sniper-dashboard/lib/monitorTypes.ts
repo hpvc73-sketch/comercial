@@ -19,11 +19,11 @@ export interface TokenSnapshot {
   volumeUsd: number;
   buysPerSecond: number;
   uniqueWallets: number;
-  topWalletShare: number;
+  topWalletShare: number | null;
   curveSlope: number;
   dumpEvents: number;
-  riskFactors: RiskFactors;
-  riskScore: number;
+  riskFactors: RiskFactors | null;
+  riskScore: number | null;
 }
 
 export interface Signal {
@@ -38,7 +38,7 @@ export interface Signal {
   confidence: number;
   createdAt: number;
   buysPerSecond: number;
-  riskScore: number;
+  riskScore: number | null;
   volumeUsd: number;
 }
 
