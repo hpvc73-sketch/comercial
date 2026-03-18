@@ -6,25 +6,54 @@ export class SolanaRpcAdapter implements SourceAdapter {
   readonly source = "solana-rpc" as const;
   private ws: WebSocket | null = null;
   private connected = false;
+  private usingHttpFallback = false;
   private lastEventAt?: number;
   private warning?: string;
   private requestId = 1;
   private reconnectTimer?: NodeJS.Timeout;
+  private httpFallbackTimer?: NodeJS.Timeout;
 
-  constructor(private wsEndpoint: string | undefined, private pumpProgramId: string) {}
+  constructor(private rpcHttpUrl: string | undefined, private pumpProgramId: string) {}
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
-    if (this.ws || !this.wsEndpoint) {
-      if (!this.wsEndpoint) this.warning = "SOLANA_RPC_WS_URL não configurado (obrigatório).";
+    if (!this.rpcHttpUrl) {
+      this.warning = "SOLANA_RPC_URL não configurado (obrigatório).";
       return;
     }
 
-    this.ws = new WebSocket(this.wsEndpoint);
+    if (this.ws || this.httpFallbackTimer) return;
+    this.connectWs(onEvent);
+  }
+
+  stop(): void {
+    this.ws?.close();
+    this.ws = null;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.httpFallbackTimer) clearInterval(this.httpFallbackTimer);
+  }
+
+  getHealth(): SourceHealth {
+    return {
+      source: this.source,
+      connected: this.connected,
+      lastEventAt: this.lastEventAt,
+      warning: this.warning,
+    };
+  }
+
+  private connectWs(onEvent: (event: UnifiedTokenEvent) => void) {
+    const wsUrl = this.rpcHttpUrl?.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+    if (!wsUrl) return;
+
+    this.log(`a tentar ligação WS RPC: ${wsUrl}`);
+    this.ws = new WebSocket(wsUrl);
 
     this.ws.addEventListener("open", () => {
       this.connected = true;
+      this.usingHttpFallback = false;
       this.warning = undefined;
       this.subscribeLogs();
+      this.log("ligação WS RPC estabelecida com sucesso");
       onEvent({ eventId: `health:${Date.now()}:solana`, source: this.source, eventType: "health", timestamp: Date.now() });
     });
 
@@ -93,43 +122,66 @@ export class SolanaRpcAdapter implements SourceAdapter {
     });
 
     this.ws.addEventListener("close", () => {
-      this.connected = false;
-      this.warning = "Solana RPC websocket offline";
       this.ws = null;
+      this.log("WS RPC fechado; fallback para HTTP e reconexão automática");
+      this.startHttpFallback(onEvent);
       this.scheduleReconnect(onEvent);
     });
 
     this.ws.addEventListener("error", () => {
       this.warning = "Erro no websocket Solana RPC";
+      this.log("erro na ligação WS RPC");
     });
-  }
-
-  stop(): void {
-    this.ws?.close();
-    this.ws = null;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-  }
-
-  getHealth(): SourceHealth {
-    return {
-      source: this.source,
-      connected: this.connected,
-      lastEventAt: this.lastEventAt,
-      warning: this.warning,
-    };
   }
 
   private subscribeLogs() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const id = this.requestId++;
     this.ws.send(
       JSON.stringify({
         jsonrpc: "2.0",
-        id,
+        id: this.requestId++,
         method: "logsSubscribe",
         params: [{ mentions: [this.pumpProgramId] }, { commitment: "confirmed" }],
       }),
     );
+  }
+
+  private startHttpFallback(onEvent: (event: UnifiedTokenEvent) => void) {
+    if (!this.rpcHttpUrl || this.httpFallbackTimer) return;
+
+    this.usingHttpFallback = true;
+    this.warning = "WS indisponível; a usar HTTP fallback";
+    this.httpFallbackTimer = setInterval(async () => {
+      try {
+        const res = await fetch(this.rpcHttpUrl as string, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: this.requestId++, method: "getSlot", params: [{ commitment: "confirmed" }] }),
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        this.connected = true;
+        this.lastEventAt = Date.now();
+        onEvent({ eventId: `health:http:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now() });
+      } catch (error) {
+        this.connected = false;
+        this.warning = `HTTP fallback falhou: ${(error as Error).message}`;
+      }
+    }, 5000);
+    this.httpFallbackTimer.unref();
+  }
+
+  private scheduleReconnect(onEvent: (event: UnifiedTokenEvent) => void) {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.httpFallbackTimer) {
+        clearInterval(this.httpFallbackTimer);
+        this.httpFallbackTimer = undefined;
+      }
+      this.connectWs(onEvent);
+    }, 3000);
+    this.reconnectTimer.unref();
   }
 
   private extractMintCandidates(logs: string[]): string[] {
@@ -144,12 +196,7 @@ export class SolanaRpcAdapter implements SourceAdapter {
     return Array.from(values);
   }
 
-  private scheduleReconnect(onEvent: (event: UnifiedTokenEvent) => void) {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = undefined;
-      this.start(onEvent);
-    }, 2500);
-    this.reconnectTimer.unref();
+  private log(message: string) {
+    console.info(`[solana-rpc] ${message}`);
   }
 }

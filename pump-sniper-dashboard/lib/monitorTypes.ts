@@ -100,11 +100,19 @@ export interface MonitorSettings {
 
 export type DataMode = "live" | "mock" | "unavailable";
 
+export interface SourceHealthView {
+  source: "pumpportal" | "solana-rpc" | "helius-grpc";
+  connected: boolean;
+  warning?: string;
+  lastEventAt?: number;
+}
+
 export interface MonitorState {
   connected: boolean;
   lastEventAt: number;
   dataMode: DataMode;
   dataWarning?: string;
+  sourceHealth: SourceHealthView[];
   tokens: TokenSnapshot[];
   signals: Signal[];
   positions: Position[];

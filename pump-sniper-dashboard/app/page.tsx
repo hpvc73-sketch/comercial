@@ -89,9 +89,41 @@ export default function HomePage() {
     };
   }, []);
 
-  const filteredTokens = useMemo(() => {
-    if (!state) return [];
-    return state.tokens.filter((token) => token.riskScore !== null && token.riskScore <= riskFilter).slice(0, 30);
+  const { filteredTokens, filteredOut, filterDebug } = useMemo(() => {
+    if (!state) {
+      return {
+        filteredTokens: [],
+        filteredOut: 0,
+        filterDebug: { risk: 0, volume: 0, missingMetrics: 0, state: 0 },
+      };
+    }
+
+    let excludedByRisk = 0;
+    const excludedByVolume = 0;
+    const excludedByMissingMetrics = 0;
+    const excludedByState = 0;
+
+    const tokens = state.tokens.filter((token) => {
+      if (token.riskScore === null) return true;
+      const include = token.riskScore <= riskFilter;
+      if (!include) excludedByRisk += 1;
+      return include;
+    });
+
+    console.debug(
+      `[table-filter] excluded by risk filter: ${excludedByRisk}, volume: ${excludedByVolume}, missing metrics: ${excludedByMissingMetrics}, state: ${excludedByState}`,
+    );
+
+    return {
+      filteredTokens: tokens.slice(0, 80),
+      filteredOut: excludedByRisk + excludedByVolume + excludedByMissingMetrics + excludedByState,
+      filterDebug: {
+        risk: excludedByRisk,
+        volume: excludedByVolume,
+        missingMetrics: excludedByMissingMetrics,
+        state: excludedByState,
+      },
+    };
   }, [state, riskFilter]);
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
@@ -131,6 +163,17 @@ export default function HomePage() {
       <p style={{ opacity: 0.85, marginTop: 0 }}>Status stream: {status === "connected" ? "SSE live" : "Fallback polling"}</p>
       {state.dataWarning ? <p className="warning-box">⚠ {state.dataWarning}</p> : null}
 
+      <div style={{ display: "flex", gap: 16, marginBottom: 10, fontSize: 13, opacity: 0.9 }}>
+        <span>tokens discovered: <strong>{state.tokens.length}</strong></span>
+        <span>tokens shown: <strong>{filteredTokens.length}</strong></span>
+        <span>tokens filtered out: <strong>{filteredOut}</strong> (risk {filterDebug.risk}, volume {filterDebug.volume}, missing {filterDebug.missingMetrics}, state {filterDebug.state})</span>
+      </div>
+
+      <section style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+        <SourceHealthBadge name="pumpportal" state={state} />
+        <SourceHealthBadge name="solana-rpc" state={state} />
+        <SourceHealthBadge name="helius-grpc" state={state} />
+      </section>
       <section style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12, marginBottom: 18 }}>
         <Card label="Saldo virtual" value={fmtUsd(state.balances.paperUsd)} />
         <Card label="PnL paper diário" value={fmtUsd(state.metrics.realizedPnlPaper)} />
@@ -211,7 +254,7 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
 function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {
   return (
     <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, background: "#0f172a" }}>
-      <h3 style={{ marginTop: 0 }}>Sinais (real tokens only)</h3>
+      <h3 style={{ marginTop: 0 }}>Sinais (live state)</h3>
       <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
         {signals.map((signal) => {
           const isFresh = freshSignalIds.has(signal.id);
@@ -234,6 +277,18 @@ function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSig
         })}
       </ul>
     </div>
+  );
+}
+
+
+function SourceHealthBadge({ name, state }: { name: "pumpportal" | "solana-rpc" | "helius-grpc"; state: MonitorState }) {
+  const source = state.sourceHealth.find((item) => item.source === name);
+  const online = source?.connected ?? false;
+  const warning = source?.warning;
+  return (
+    <span className={online ? "badge-confirmed" : "badge-unconfirmed"} title={warning ?? ""}>
+      {name}: {online ? "ONLINE" : "OFFLINE"}
+    </span>
   );
 }
 

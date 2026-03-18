@@ -46,6 +46,7 @@ class MonitorEngine extends EventEmitter {
       lastEventAt: Date.now(),
       dataMode: "unavailable",
       dataWarning: "A ligar às fontes live...",
+      sourceHealth: [],
       tokens: [],
       signals: [],
       positions: [],
@@ -71,14 +72,16 @@ class MonitorEngine extends EventEmitter {
   start() {
     if (this.adapters.length > 0) return;
 
-    const solanaWs = process.env.SOLANA_RPC_WS_URL;
+    const solanaRpcUrl =
+      process.env.SOLANA_RPC_URL ??
+      "https://beta.helius-rpc.com/?api-key=243e2279-93a7-4c94-835d-3d71155b03d0";
     const heliusWs =
       process.env.HELIUS_GRPC_WS_URL ??
       (process.env.HELIUS_API_KEY ? `wss://atlas-mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` : undefined);
     const pumpProgramId = process.env.PUMPFUN_PROGRAM_ID ?? "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
     const pumpPortal = new PumpPortalAdapter();
-    const solanaRpc = new SolanaRpcAdapter(solanaWs, pumpProgramId);
+    const solanaRpc = new SolanaRpcAdapter(solanaRpcUrl, pumpProgramId);
     const helius = new HeliusGrpcAdapter(heliusWs, pumpProgramId);
 
     this.adapters = [pumpPortal, solanaRpc, helius];
@@ -174,9 +177,12 @@ class MonitorEngine extends EventEmitter {
     this.refreshStateFromStore();
 
     const snapshot = this.state.tokens.find((item) => item.mintAddress === token.mintAddress);
-    if (snapshot?.confirmationStatus === "confirmed") {
-      this.evaluateSignal(snapshot);
-      this.updatePositions(snapshot);
+    if (snapshot) {
+      this.emitSignalCandidate(snapshot);
+      if (snapshot.confirmationStatus === "confirmed") {
+        this.evaluateSignal(snapshot);
+        this.updatePositions(snapshot);
+      }
     }
 
     this.state.lastEventAt = Date.now();
@@ -263,6 +269,12 @@ class MonitorEngine extends EventEmitter {
     this.state.connected = health.some((entry) => entry.connected);
     this.state.dataMode = liveConnected || premiumConnected ? "live" : "unavailable";
     this.state.dataWarning = this.healthMonitor.combinedWarning();
+    this.state.sourceHealth = health.map((entry) => ({
+      source: entry.source,
+      connected: entry.connected,
+      warning: entry.warning,
+      lastEventAt: entry.lastEventAt,
+    }));
   }
 
   private markStaleTokens() {
@@ -274,6 +286,31 @@ class MonitorEngine extends EventEmitter {
     }
     this.refreshStateFromStore();
     this.emitUpdate();
+  }
+
+  private emitSignalCandidate(token: TokenSnapshot) {
+    const recentExists = this.state.signals.some(
+      (signal) => signal.mintAddress === token.mintAddress && Date.now() - signal.createdAt < 10_000,
+    );
+    if (recentExists) return;
+
+    const candidate: Signal = {
+      id: crypto.randomUUID(),
+      mintAddress: token.mintAddress,
+      tokenSymbol: token.symbol,
+      tokenName: token.name,
+      side: "buy",
+      reason: "candidate from live discovery",
+      confidence: 10,
+      createdAt: Date.now(),
+      buysPerSecond: token.buysPerSecond,
+      riskScore: token.riskScore,
+      volumeUsd: token.volumeUsd,
+      source: token.source,
+      confirmationStatus: token.confirmationStatus,
+    };
+
+    this.state.signals = [candidate, ...this.state.signals.filter((entry) => entry.id !== candidate.id)].slice(0, 30);
   }
 
   private evaluateSignal(token: TokenSnapshot) {
