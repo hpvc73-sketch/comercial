@@ -18,14 +18,17 @@ const BLOCKED_ADDRESSES = new Set([
   "ATokenGPvR93Af2U4f2S7jH9MuNoMNFkQJUon2cRPn7A",
 ]);
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const BUY_WINDOW_MS = 5_000;
+const MAX_RECENT_TRADES = 120;
+const MIN_UNIQUE_WALLETS_FOR_ENTRY = 20;
 
 const DEFAULT_SETTINGS: MonitorSettings = {
   paperBankrollUsd: 5000,
   strategy: {
     enabled: true,
-    minBuysPerSecond: 2,
+    minBuysPerSecond: 2.5,
     maxRiskScore: 45,
-    minVolumeUsd: 4000,
+    minVolumeUsd: 2000,
     entryUsdSize: 100,
     takeProfitPct: 18,
     stopLossPct: 10,
@@ -215,21 +218,53 @@ class MonitorEngine extends EventEmitter {
 
     if (event.confirmationStatus === "confirmed" || event.eventType === "confirmed") token.confirmationStatus = "confirmed";
 
-    if (event.volumeUsd) token.volumeUsd += event.volumeUsd;
-    if (event.priceUsd && event.priceUsd > 0) token.priceUsd = event.priceUsd;
+    const tradeUsd = event.tradeUsd ?? event.volumeUsd;
+    const tradeSide = event.tradeSide ?? (event.buysDelta ? "buy" : event.sellsDelta ? "sell" : undefined);
+
+    if (event.priceUsd && event.priceUsd > 0) {
+      token.priceUsd = event.priceUsd;
+      this.log(`price updated ${token.symbol} ${token.mintAddress}: ${event.priceUsd.toFixed(8)}`);
+    }
+    if (typeof tradeUsd === "number" && tradeUsd > 0) {
+      token.volumeUsd = (token.volumeUsd ?? 0) + tradeUsd;
+      this.log(`volume updated ${token.symbol} ${token.mintAddress}: ${token.volumeUsd.toFixed(2)} USD`);
+    }
     if (event.buysDelta) {
       token.buys += event.buysDelta;
       token.buyTimestamps.push(event.timestamp);
+      this.log(`buy detected ${token.symbol} ${token.mintAddress}`);
     }
     if (event.sellsDelta) token.sells += event.sellsDelta;
+    if (event.sellsDelta) token.sellTimestamps.push(event.timestamp);
     if (event.trader) {
       token.traders.add(event.trader);
+      if (tradeSide === "buy") {
+        const preSize = token.buyerWallets.size;
+        token.buyerWallets.add(event.trader);
+        if (token.buyerWallets.size > preSize) {
+          this.log(`wallet added ${token.symbol} ${token.mintAddress}: ${event.trader}`);
+        }
+      }
       const current = token.traderVolumeUsd.get(event.trader) ?? 0;
-      token.traderVolumeUsd.set(event.trader, current + (event.volumeUsd ?? 0));
+      token.traderVolumeUsd.set(event.trader, current + (tradeUsd ?? 0));
     }
 
-    const cutoff = Date.now() - 10_000;
+    if (tradeSide && (typeof tradeUsd === "number" || event.priceUsd || event.tradeTokenAmount || event.tradeSolAmount)) {
+      token.recentTrades.push({
+        timestamp: event.timestamp,
+        side: tradeSide,
+        wallet: event.trader,
+        usdAmount: tradeUsd,
+        priceUsd: event.priceUsd,
+        tokenAmount: event.tradeTokenAmount,
+        solAmount: event.tradeSolAmount,
+      });
+    }
+
+    const cutoff = Date.now() - BUY_WINDOW_MS;
     token.buyTimestamps = token.buyTimestamps.filter((ts) => ts >= cutoff);
+    token.sellTimestamps = token.sellTimestamps.filter((ts) => ts >= cutoff);
+    token.recentTrades = token.recentTrades.filter((trade) => trade.timestamp >= Date.now() - 300_000).slice(-MAX_RECENT_TRADES);
 
     this.refreshStateFromStore();
 
@@ -253,8 +288,12 @@ class MonitorEngine extends EventEmitter {
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 120)
       .map<TokenSnapshot>((token) => {
-        const buysPerSecond = Number((token.buyTimestamps.length / 10).toFixed(2));
-        const curveSlope = Number((buysPerSecond * 1.2 - token.sells * 0.4).toFixed(2));
+        const now = Date.now();
+        const windowStart = now - BUY_WINDOW_MS;
+        const buysInWindow = token.buyTimestamps.filter((ts) => ts >= windowStart).length;
+        const buysPerSecondRaw = buysInWindow / (BUY_WINDOW_MS / 1000);
+        const buysPerSecond = buysInWindow > 0 ? Number(buysPerSecondRaw.toFixed(2)) : null;
+        const curveSlope = Number(((buysPerSecond ?? 0) * 1.2 - token.sells * 0.4).toFixed(2));
 
         const totalTraderVolume = Array.from(token.traderVolumeUsd.values()).reduce((sum, value) => sum + value, 0);
         const topTraderVolume = token.traderVolumeUsd.size > 0 ? Math.max(...token.traderVolumeUsd.values()) : 0;
@@ -264,13 +303,13 @@ class MonitorEngine extends EventEmitter {
           ? Number(((topTraderVolume / totalTraderVolume) * 100).toFixed(2))
           : null;
 
-        const hasRiskInputs = token.volumeUsd > 0 && token.traders.size >= 2 && token.buyTimestamps.length > 0;
+        const hasRiskInputs = token.volumeUsd !== null && token.volumeUsd > 0 && token.buyerWallets.size >= 2 && buysPerSecond !== null;
         const riskFactors = hasRiskInputs
           ? {
-              buySpeed: Math.max(0, 100 - buysPerSecond * 12),
+              buySpeed: Math.max(0, 100 - (buysPerSecond ?? 0) * 12),
               walletConcentration: topWalletShare ?? 50,
               curveBehavior: Math.min(100, Math.max(0, 50 - curveSlope * 3)),
-              earlyVolume: Math.max(0, 100 - token.volumeUsd / 400),
+              earlyVolume: Math.max(0, 100 - (token.volumeUsd ?? 0) / 400),
               earlyDumpSignals: Math.min(100, token.sells * 10),
             }
           : null;
@@ -284,6 +323,14 @@ class MonitorEngine extends EventEmitter {
 
         const preferredSource = token.firstDetectedSource;
 
+        const qualitySignals = [
+          token.priceUsd !== null,
+          token.volumeUsd !== null,
+          buysPerSecond !== null,
+          token.buyerWallets.size > 0,
+        ].filter(Boolean).length;
+        const dataQuality: TokenSnapshot["dataQuality"] = qualitySignals >= 4 ? "complete" : qualitySignals >= 2 ? "partial" : "low";
+
         return {
           mintAddress: token.mintAddress,
           source: preferredSource,
@@ -295,11 +342,12 @@ class MonitorEngine extends EventEmitter {
           symbol: token.symbol,
           name: token.name,
           createdAt: token.createdAt,
-          ageSeconds: Math.floor((Date.now() - token.createdAt) / 1000),
-          price: Number((token.priceUsd || 0).toFixed(8)),
-          volumeUsd: Number(token.volumeUsd.toFixed(2)),
+          ageSeconds: Math.floor((now - token.createdAt) / 1000),
+          price: token.priceUsd !== null ? Number(token.priceUsd.toFixed(8)) : null,
+          volumeUsd: token.volumeUsd !== null ? Number(token.volumeUsd.toFixed(2)) : null,
           buysPerSecond,
-          uniqueWallets: token.traders.size,
+          uniqueWallets: token.buyerWallets.size > 0 ? token.buyerWallets.size : null,
+          dataQuality,
           topWalletShare,
           curveSlope,
           dumpEvents: token.sells,
@@ -374,6 +422,7 @@ class MonitorEngine extends EventEmitter {
   private evaluateSignal(token: TokenSnapshot) {
     const { strategy } = this.state.settings;
     if (!strategy.enabled) return;
+    if (token.buysPerSecond === null || token.volumeUsd === null || token.uniqueWallets === null) return;
 
     this.tradeTimestamps = this.tradeTimestamps.filter((ts) => Date.now() - ts < 3600_000);
 
@@ -386,6 +435,7 @@ class MonitorEngine extends EventEmitter {
       token.riskScore <= strategy.maxRiskScore &&
       token.confirmationStatus === "confirmed" &&
       token.volumeUsd >= strategy.minVolumeUsd &&
+      token.uniqueWallets >= MIN_UNIQUE_WALLETS_FOR_ENTRY &&
       !isCooldown &&
       this.tradeTimestamps.length < strategy.maxTradesPerHour;
 
@@ -397,7 +447,7 @@ class MonitorEngine extends EventEmitter {
       tokenSymbol: token.symbol,
       tokenName: token.name,
       side: "buy",
-      reason: `buy/s ${token.buysPerSecond.toFixed(2)}, risco ${(token.riskScore ?? 0).toFixed(0)}, vol ${token.volumeUsd.toFixed(0)}`,
+      reason: `buy/s ${token.buysPerSecond.toFixed(2)}, risco ${(token.riskScore ?? 0).toFixed(0)}, vol ${token.volumeUsd.toFixed(0)}, wallets ${token.uniqueWallets}`,
       confidence: Math.max(1, 100 - (token.riskScore ?? 100)),
       createdAt: Date.now(),
       buysPerSecond: token.buysPerSecond,
@@ -417,6 +467,7 @@ class MonitorEngine extends EventEmitter {
   }
 
   private openPaperPosition(token: TokenSnapshot, reason: string) {
+    if (token.price === null || token.price <= 0) return;
     const size = this.state.settings.strategy.entryUsdSize;
     if (this.state.balances.paperUsd < size) return;
 
@@ -454,24 +505,28 @@ class MonitorEngine extends EventEmitter {
   }
 
   private updatePositions(token: TokenSnapshot) {
+    if (token.price === null || token.price <= 0) return;
+    const tokenPrice = token.price;
     const toClose = this.state.positions.filter((position) => {
       if (position.mintAddress !== token.mintAddress) return false;
-      position.highestPrice = Math.max(position.highestPrice, token.price);
+      position.highestPrice = Math.max(position.highestPrice, tokenPrice);
       if (position.trailingStopPct) {
         const trailing = position.highestPrice * (1 - position.trailingStopPct / 100);
         position.stopLoss = Math.max(position.stopLoss, trailing);
       }
-      return token.price <= position.stopLoss || token.price >= position.takeProfit;
+      return tokenPrice <= position.stopLoss || tokenPrice >= position.takeProfit;
     });
 
     toClose.forEach((position) => this.closePosition(position, token));
   }
 
   private closePosition(position: Position, token: TokenSnapshot) {
+    if (token.price === null) return;
     this.state.positions = this.state.positions.filter((entry) => entry.id !== position.id);
 
     const entry = position.entryPrice * position.quantity;
-    const exit = token.price * position.quantity;
+    const exitPrice = token.price;
+    const exit = exitPrice * position.quantity;
     const pnl = exit - entry;
 
     this.state.balances.paperUsd += exit;
@@ -485,7 +540,7 @@ class MonitorEngine extends EventEmitter {
       tokenSymbol: position.tokenSymbol,
       tokenName: position.tokenName,
       side: "sell",
-      price: token.price,
+      price: exitPrice,
       quantity: position.quantity,
       pnlUsd: pnl,
       reason: pnl >= 0 ? "Take profit" : "Stop loss",

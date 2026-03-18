@@ -14,6 +14,10 @@ export interface UnifiedTokenEvent {
   confirmationStatus?: ConfirmationStatus;
   priceUsd?: number;
   volumeUsd?: number;
+  tradeUsd?: number;
+  tradeTokenAmount?: number;
+  tradeSolAmount?: number;
+  tradeSide?: "buy" | "sell";
   buysDelta?: number;
   sellsDelta?: number;
   trader?: string;

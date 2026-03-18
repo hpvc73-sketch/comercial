@@ -20,10 +20,11 @@ export interface TokenSnapshot {
   name: string;
   createdAt: number;
   ageSeconds: number;
-  price: number;
-  volumeUsd: number;
-  buysPerSecond: number;
-  uniqueWallets: number;
+  price: number | null;
+  volumeUsd: number | null;
+  buysPerSecond: number | null;
+  uniqueWallets: number | null;
+  dataQuality: "low" | "partial" | "complete";
   topWalletShare: number | null;
   curveSlope: number;
   dumpEvents: number;
@@ -42,9 +43,9 @@ export interface Signal {
   reason: string;
   confidence: number;
   createdAt: number;
-  buysPerSecond: number;
+  buysPerSecond: number | null;
   riskScore: number | null;
-  volumeUsd: number;
+  volumeUsd: number | null;
 }
 
 export interface Position {

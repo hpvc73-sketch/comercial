@@ -80,40 +80,57 @@ export class SolanaRpcAdapter implements SourceAdapter {
 
       this.lastEventAt = Date.now();
       const lowerLogs = logs.join(" ").toLowerCase();
+      const isCreate = lowerLogs.includes("initialize") || lowerLogs.includes("create") || lowerLogs.includes("mint");
+      const isBuy = /\bbuy\b/.test(lowerLogs);
+      const isSell = /\bsell\b/.test(lowerLogs);
+      const isLiquidity = lowerLogs.includes("liquidity") || lowerLogs.includes("add_liquidity") || lowerLogs.includes("remove_liquidity");
+
+      if (!isCreate && !isBuy && !isSell && !isLiquidity) return;
 
       for (const mintAddress of detectedMints) {
-        const isCreate = lowerLogs.includes("initialize") || lowerLogs.includes("create") || lowerLogs.includes("mint");
-        const isBuy = lowerLogs.includes("buy");
-        const isLiquidity = lowerLogs.includes("liquidity") || lowerLogs.includes("add_liquidity");
+        const timestamp = Date.now();
+        if (isCreate) {
+          onEvent({
+            eventId: `${this.source}-discovered:${mintAddress}:${timestamp}`,
+            source: this.source,
+            eventType: "discovered",
+            mintAddress,
+            timestamp,
+            discoveryStatus: "discovered",
+            confirmationStatus: "confirmed",
+          });
+        }
+
+        if (isBuy || isSell) {
+          onEvent({
+            eventId: `${this.source}-trade:${mintAddress}:${timestamp}`,
+            source: this.source,
+            eventType: "trade",
+            mintAddress,
+            timestamp,
+            confirmationStatus: "confirmed",
+            buysDelta: isBuy ? 1 : 0,
+            sellsDelta: isSell ? 1 : 0,
+            tradeSide: isBuy ? "buy" : "sell",
+          });
+        }
 
         onEvent({
-          eventId: `${this.source}-discovered:${mintAddress}:${Date.now()}`,
-          source: this.source,
-          eventType: isCreate ? "discovered" : "trade",
-          mintAddress,
-          timestamp: Date.now(),
-          discoveryStatus: "discovered",
-          confirmationStatus: "confirmed",
-          buysDelta: isBuy ? 1 : 0,
-          sellsDelta: lowerLogs.includes("sell") ? 1 : 0,
-        });
-
-        onEvent({
-          eventId: `${this.source}-confirmed:${mintAddress}:${Date.now()}`,
+          eventId: `${this.source}-confirmed:${mintAddress}:${timestamp}`,
           source: this.source,
           eventType: "confirmed",
           mintAddress,
-          timestamp: Date.now(),
+          timestamp,
           confirmationStatus: "confirmed",
         });
 
         if (isLiquidity) {
           onEvent({
-            eventId: `${this.source}-liquidity:${mintAddress}:${Date.now()}`,
+            eventId: `${this.source}-liquidity:${mintAddress}:${timestamp}`,
             source: this.source,
             eventType: "liquidity",
             mintAddress,
-            timestamp: Date.now(),
+            timestamp,
             discoveryStatus: "migrated",
             confirmationStatus: "confirmed",
           });

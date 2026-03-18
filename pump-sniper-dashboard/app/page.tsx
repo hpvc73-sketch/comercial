@@ -3,8 +3,14 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { MonitorState, Signal, TokenSnapshot } from "../lib/monitorTypes";
 
-function fmtUsd(n: number) {
+function fmtUsd(n: number | null | undefined) {
+  if (typeof n !== "number" || Number.isNaN(n)) return "N/A";
   return n.toLocaleString("pt-PT", { style: "currency", currency: "USD" });
+}
+
+function fmtNumber(n: number | null | undefined, digits = 2) {
+  if (typeof n !== "number" || Number.isNaN(n)) return "N/A";
+  return n.toFixed(digits);
 }
 
 function phantomLink(mintAddress: string) {
@@ -244,14 +250,14 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
           <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">{token.mintAddress}</a>
         </div>
       </td>
-      <td>{token.price.toFixed(8)}</td>
+      <td>{fmtNumber(token.price, 8)}</td>
       <td>{fmtUsd(token.volumeUsd)}</td>
-      <td>{token.buysPerSecond.toFixed(2)}</td>
-      <td>{token.uniqueWallets}</td>
+      <td>{fmtNumber(token.buysPerSecond, 2)}</td>
+      <td>{token.uniqueWallets ?? "N/A"}</td>
       <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
       <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
       <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
-      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.confirmationStatus === "confirmed" ? token.discoveryStatus : "partial"} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
+      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.confirmationStatus === "confirmed" ? token.discoveryStatus : "partial"} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>quality: <strong>{token.dataQuality}</strong> · Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
     </tr>
   );
 }
@@ -275,7 +281,7 @@ function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSig
                 {signal.mintAddress}
               </a>
               <div style={{ marginTop: 4, fontSize: 13 }}>
-                buys/s <strong>{signal.buysPerSecond.toFixed(2)}</strong> · risco <strong>{signal.riskScore === null ? "N/A" : signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
+                buys/s <strong>{fmtNumber(signal.buysPerSecond, 2)}</strong> · risco <strong>{signal.riskScore === null ? "N/A" : signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
               </div>
             </li>
           );

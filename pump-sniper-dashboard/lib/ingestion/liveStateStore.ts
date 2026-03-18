@@ -9,13 +9,24 @@ export interface LiveTokenState {
   confirmationStatus: ConfirmationStatus;
   createdAt: number;
   updatedAt: number;
-  priceUsd: number;
-  volumeUsd: number;
+  priceUsd: number | null;
+  volumeUsd: number | null;
   buys: number;
   sells: number;
   traders: Set<string>;
+  buyerWallets: Set<string>;
   traderVolumeUsd: Map<string, number>;
   buyTimestamps: number[];
+  sellTimestamps: number[];
+  recentTrades: Array<{
+    timestamp: number;
+    side: "buy" | "sell";
+    wallet?: string;
+    usdAmount?: number;
+    priceUsd?: number;
+    tokenAmount?: number;
+    solAmount?: number;
+  }>;
   detectedAtBySource: Map<DataSource, number>;
   firstDetectedSource: DataSource;
   firstDetectedAt: number;
@@ -37,13 +48,16 @@ export class LiveStateStore {
       confirmationStatus: defaults.confirmationStatus ?? "unconfirmed",
       createdAt: defaults.timestamp,
       updatedAt: defaults.timestamp,
-      priceUsd: defaults.priceUsd ?? 0,
-      volumeUsd: defaults.volumeUsd ?? 0,
+      priceUsd: defaults.priceUsd ?? null,
+      volumeUsd: defaults.volumeUsd ?? null,
       buys: 0,
       sells: 0,
       traders: new Set<string>(),
+      buyerWallets: new Set<string>(),
       traderVolumeUsd: new Map<string, number>(),
       buyTimestamps: [],
+      sellTimestamps: [],
+      recentTrades: [],
       detectedAtBySource: new Map<DataSource, number>([[defaults.source, defaults.timestamp]]),
       firstDetectedSource: defaults.source,
       firstDetectedAt: defaults.timestamp,
