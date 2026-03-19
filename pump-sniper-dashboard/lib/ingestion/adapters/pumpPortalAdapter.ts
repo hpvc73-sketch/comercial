@@ -7,6 +7,7 @@ export class PumpPortalAdapter implements SourceAdapter {
   readonly source = "pumpportal" as const;
   private readonly staleMs = Number(process.env.PUMPPORTAL_STALE_MS ?? 15_000);
   private readonly watchdogIntervalMs = Number(process.env.PUMPPORTAL_WATCHDOG_INTERVAL_MS ?? 3_000);
+  private readonly enableHeartbeat = process.env.PUMPPORTAL_ENABLE_HEARTBEAT === "true";
   private readonly reconnectBackoffBaseMs = Number(process.env.PUMPPORTAL_RECONNECT_BACKOFF_MS ?? 2_000);
   private readonly reconnectBackoffMaxMs = Number(process.env.PUMPPORTAL_MAX_BACKOFF_MS ?? 10_000);
 
@@ -31,6 +32,12 @@ export class PumpPortalAdapter implements SourceAdapter {
   private subscribedMints = new Set<string>();
   private stopped = false;
   private onEventCallback?: (event: UnifiedTokenEvent) => void;
+  private socketListeners?: {
+    open: () => void;
+    message: (event: MessageEvent) => void;
+    close: (event: CloseEvent) => void;
+    error: (event: Event) => void;
+  };
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
     this.onEventCallback = onEvent;
@@ -76,13 +83,17 @@ export class PumpPortalAdapter implements SourceAdapter {
     this.transitionTo("connecting", reason);
 
     const generation = ++this.wsGeneration;
-    const socket = new WebSocket("wss://pumpportal.fun/api/data");
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket("wss://pumpportal.fun/api/data");
+    } catch {
+      this.transitionTo("errored", "connect failed");
+      this.emitHealth("reconnect failed");
+      this.forceReconnect("connect failed");
+      return;
+    }
     this.ws = socket;
-
-    socket.addEventListener("open", () => this.handleOpen(generation));
-    socket.addEventListener("message", (message) => this.handleMessage(generation, message));
-    socket.addEventListener("close", (event) => this.handleClose(generation, event));
-    socket.addEventListener("error", (event) => this.handleError(generation, event));
+    this.attachSocketListeners(socket, generation);
   }
 
   private handleOpen(generation: number) {
@@ -91,7 +102,6 @@ export class PumpPortalAdapter implements SourceAdapter {
     this.warning = undefined;
     this.lastConnectAt = Date.now();
     this.lastMessageAt = Date.now();
-    this.lastRealEventAt = Date.now();
     this.reconnectAttempt = 0;
 
     this.transitionTo("connected", "websocket opened");
@@ -103,6 +113,7 @@ export class PumpPortalAdapter implements SourceAdapter {
     }
 
     this.emitHealth("websocket opened");
+    if (this.reconnectCount > 0) this.emitHealth("reconnect succeeded");
     this.emitHealth(`subscriptions restored (${this.subscribedMints.size} tracked mints)`);
 
     this.startHeartbeat();
@@ -186,6 +197,12 @@ export class PumpPortalAdapter implements SourceAdapter {
   }
 
   private startHeartbeat() {
+    if (!this.enableHeartbeat) {
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+      this.emitHealth("heartbeat disabled");
+      return;
+    }
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -193,6 +210,7 @@ export class PumpPortalAdapter implements SourceAdapter {
         return;
       }
       try {
+        this.emitHealth("heartbeat ping sent");
         this.ws.send(JSON.stringify({ method: "ping" }));
       } catch {
         this.forceReconnect("heartbeat send failure");
@@ -243,10 +261,14 @@ export class PumpPortalAdapter implements SourceAdapter {
     if (!socket) return;
 
     try {
-      socket.onopen = null;
-      socket.onmessage = null;
-      socket.onerror = null;
-      socket.onclose = null;
+      if (this.socketListeners) {
+        socket.removeEventListener("open", this.socketListeners.open);
+        socket.removeEventListener("message", this.socketListeners.message);
+        socket.removeEventListener("error", this.socketListeners.error);
+        socket.removeEventListener("close", this.socketListeners.close);
+        this.emitHealth("listeners removed");
+      }
+      this.socketListeners = undefined;
       if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
         socket.close(1000, reason);
       }
@@ -283,5 +305,19 @@ export class PumpPortalAdapter implements SourceAdapter {
 
   private isCurrentGeneration(generation: number) {
     return generation === this.wsGeneration;
+  }
+
+  private attachSocketListeners(socket: WebSocket, generation: number) {
+    this.socketListeners = {
+      open: () => this.handleOpen(generation),
+      message: (message) => this.handleMessage(generation, message),
+      close: (event) => this.handleClose(generation, event),
+      error: (event) => this.handleError(generation, event),
+    };
+    socket.addEventListener("open", this.socketListeners.open);
+    socket.addEventListener("message", this.socketListeners.message);
+    socket.addEventListener("close", this.socketListeners.close);
+    socket.addEventListener("error", this.socketListeners.error);
+    this.emitHealth("listeners attached");
   }
 }
