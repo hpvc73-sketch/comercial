@@ -54,9 +54,11 @@ export class PumpPortalAdapter implements SourceAdapter {
       const normalized = normalizePumpPortalPayload(payload, eventType);
       if (!normalized || !normalized.mintAddress) return;
 
+      if (eventType === "discovered" && normalized.mintAddress) {
+        this.registerMint(normalized.mintAddress);
+      }
       this.lastEventAt = Date.now();
       onEvent(normalized);
-      this.registerMint(normalized.mintAddress);
       if (eventType === "discovered") {
         onEvent({
           eventId: `health:new-token:${normalized.mintAddress}:${Date.now()}`,
@@ -100,6 +102,7 @@ export class PumpPortalAdapter implements SourceAdapter {
     this.subscribedMints.add(mintAddress);
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mintAddress] }));
+    console.debug(`Subscribed to trades immediately for mint: ${mintAddress}`);
   }
 
   getHealth(): SourceHealth {
