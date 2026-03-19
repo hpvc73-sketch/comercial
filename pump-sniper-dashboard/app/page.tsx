@@ -446,9 +446,10 @@ function SignalsPanel({ tokens, freshSignalIds }: { tokens: TokenSnapshot[]; fre
 
 
 function SourceHealthBadge({ source }: { source: MonitorState["sourceHealth"][number] }) {
+  const label = source.state ?? (source.connected ? "connected" : "stopped");
   return (
     <span className={source.connected ? "badge-confirmed" : "badge-unconfirmed"} title={source.warning ?? ""}>
-      {source.source}: {source.connected ? "ONLINE" : "OFFLINE"}
+      {source.source}: {label.toUpperCase()}
     </span>
   );
 }

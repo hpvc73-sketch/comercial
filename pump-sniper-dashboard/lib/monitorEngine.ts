@@ -699,17 +699,28 @@ class MonitorEngine extends EventEmitter {
 
   private updateHealthState() {
     const health = this.healthMonitor.snapshot();
+    const pumpPortalHealth = health.find((entry) => entry.source === "pumpportal");
     const liveConnected = health.some((entry) => entry.connected && entry.source === "pumpportal");
     const premiumConnected = health.some((entry) => entry.connected && entry.source === "helius-grpc");
 
     this.state.connected = health.some((entry) => entry.connected);
+    const pumpPortalState = pumpPortalHealth?.state;
+    if (pumpPortalState === "stale" || pumpPortalState === "reconnecting" || pumpPortalState === "connecting") this.state.streamStats.streamStatus = pumpPortalState === "stale" ? "stale" : "reconnecting";
     this.state.dataMode = liveConnected || premiumConnected ? "live" : "unavailable";
     this.state.dataWarning = this.healthMonitor.combinedWarning();
     this.state.sourceHealth = health.map((entry) => ({
       source: entry.source,
       connected: entry.connected,
+      state: entry.state,
       warning: entry.warning,
       lastEventAt: entry.lastEventAt,
+      lastMessageAt: entry.lastMessageAt,
+      lastRealEventAt: entry.lastRealEventAt,
+      lastRealEventAgeSeconds: entry.lastRealEventAgeSeconds,
+      wsReadyState: entry.wsReadyState,
+      reconnectCount: entry.reconnectCount,
+      reconnectReason: entry.reconnectReason,
+      fallbackMode: entry.fallbackMode,
     }));
   }
 

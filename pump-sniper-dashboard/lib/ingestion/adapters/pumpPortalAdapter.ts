@@ -1,136 +1,48 @@
 import { normalizePumpPortalPayload } from "../normalizer";
 import { SourceAdapter, SourceHealth, UnifiedTokenEvent } from "../types";
 
+type PumpPortalConnectionState = "idle" | "connecting" | "connected" | "stale" | "reconnecting" | "stopped" | "errored";
+
 export class PumpPortalAdapter implements SourceAdapter {
   readonly source = "pumpportal" as const;
-  private readonly staleMs = Number(process.env.PUMPPORTAL_STALE_MS ?? 20_000);
-  private readonly watchdogIntervalMs = Number(process.env.PUMPPORTAL_WATCHDOG_INTERVAL_MS ?? 5_000);
+  private readonly staleMs = Number(process.env.PUMPPORTAL_STALE_MS ?? 15_000);
+  private readonly watchdogIntervalMs = Number(process.env.PUMPPORTAL_WATCHDOG_INTERVAL_MS ?? 3_000);
+  private readonly reconnectBackoffBaseMs = Number(process.env.PUMPPORTAL_RECONNECT_BACKOFF_MS ?? 2_000);
+  private readonly reconnectBackoffMaxMs = Number(process.env.PUMPPORTAL_MAX_BACKOFF_MS ?? 10_000);
+
   private ws: WebSocket | null = null;
+  private wsGeneration = 0;
   private connected = false;
+  private state: PumpPortalConnectionState = "idle";
+  private warning?: string;
+
   private lastEventAt?: number;
   private lastMessageAt?: number;
   private lastRealEventAt?: number;
-  private warning?: string;
+  private lastConnectAt?: number;
+
   private reconnectTimer?: NodeJS.Timeout;
-  private subscribedMints = new Set<string>();
   private heartbeatTimer?: NodeJS.Timeout;
   private watchdogTimer?: NodeJS.Timeout;
+
   private reconnectCount = 0;
-  private reconnecting = false;
+  private reconnectAttempt = 0;
+  private currentReconnectReason?: string;
+  private subscribedMints = new Set<string>();
+  private stopped = false;
+  private onEventCallback?: (event: UnifiedTokenEvent) => void;
 
   start(onEvent: (event: UnifiedTokenEvent) => void): void {
-    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) return;
-    this.reconnecting = false;
-    this.ws = new WebSocket("wss://pumpportal.fun/api/data");
-
-    this.ws.addEventListener("open", () => {
-      this.connected = true;
-      this.warning = undefined;
-      this.lastMessageAt = Date.now();
-      this.lastRealEventAt = Date.now();
-      this.ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
-      this.ws?.send(JSON.stringify({ method: "subscribeMigration" }));
-      for (const mint of this.subscribedMints) {
-        this.ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
-      }
-      onEvent({ eventId: `health:opened:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now(), warning: "websocket opened" });
-      onEvent({ eventId: `health:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now() });
-      onEvent({
-        eventId: `health:stream:${Date.now()}`,
-        source: this.source,
-        eventType: "health",
-        timestamp: Date.now(),
-        warning: this.reconnectCount > 0 ? "stream reconnected; subscription restored" : "stream connected",
-      });
-      this.startHeartbeat(onEvent);
-      this.startWatchdog(onEvent);
-      onEvent({
-        eventId: `health:subscriptions:${Date.now()}`,
-        source: this.source,
-        eventType: "health",
-        timestamp: Date.now(),
-        warning: `subscriptions restored (${this.subscribedMints.size} tracked mints)`,
-      });
-    });
-
-    this.ws.addEventListener("message", (message) => {
-      this.lastMessageAt = Date.now();
-      const raw = typeof message.data === "string" ? message.data : "";
-      if (!raw) return;
-      let payload: Record<string, unknown>;
-      try {
-        payload = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-
-      const txType = typeof payload.txType === "string" ? payload.txType.toLowerCase() : "";
-      const eventType: UnifiedTokenEvent["eventType"] = txType.includes("migr")
-        ? "migrated"
-        : txType.includes("buy") || txType.includes("sell")
-          ? "trade"
-          : "discovered";
-      const normalized = normalizePumpPortalPayload(payload, eventType);
-      if (!normalized || !normalized.mintAddress) return;
-
-      if (eventType === "discovered" && normalized.mintAddress) {
-        this.registerMint(normalized.mintAddress);
-      }
-      this.lastEventAt = Date.now();
-      this.lastRealEventAt = Date.now();
-      onEvent(normalized);
-      onEvent({
-        eventId: `health:last-real-event:${Date.now()}`,
-        source: this.source,
-        eventType: "health",
-        timestamp: Date.now(),
-        warning: `lastRealEventAt=${this.lastRealEventAt}`,
-      });
-      if (eventType === "discovered") {
-        onEvent({
-          eventId: `health:new-token:${normalized.mintAddress}:${Date.now()}`,
-          source: this.source,
-          eventType: "health",
-          timestamp: Date.now(),
-          warning: `new token appended to live state: ${normalized.mintAddress}`,
-        });
-      }
-    });
-
-    this.ws.addEventListener("close", () => {
-      this.connected = false;
-      this.warning = "PumpPortal websocket offline";
-      this.clearTimers();
-      this.ws = null;
-      onEvent({
-        eventId: `health:disconnect:${Date.now()}`,
-        source: this.source,
-        eventType: "health",
-        timestamp: Date.now(),
-        warning: "websocket closed",
-      });
-      this.scheduleReconnect(onEvent);
-    });
-
-    this.ws.addEventListener("error", () => {
-      this.warning = "Erro no websocket PumpPortal";
-      onEvent({
-        eventId: `health:error:${Date.now()}`,
-        source: this.source,
-        eventType: "health",
-        timestamp: Date.now(),
-        warning: "websocket error",
-      });
-      this.scheduleReconnect(onEvent);
-    });
+    this.onEventCallback = onEvent;
+    this.stopped = false;
+    if (this.state === "connected" || this.state === "connecting" || this.state === "reconnecting") return;
+    this.connect("start");
   }
 
   stop(): void {
-    this.clearTimers();
-    this.ws?.close();
-    this.ws = null;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = undefined;
+    this.stopped = true;
+    this.transitionTo("stopped", "stop requested");
+    this.fullTeardown("stop", true);
   }
 
   registerMint(mintAddress: string): void {
@@ -138,101 +50,238 @@ export class PumpPortalAdapter implements SourceAdapter {
     this.subscribedMints.add(mintAddress);
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mintAddress] }));
-    console.debug(`Subscribed to trades immediately for mint: ${mintAddress}`);
+    this.emitHealth(`Subscribed to trades immediately for mint: ${mintAddress}`);
   }
 
   getHealth(): SourceHealth {
     return {
       source: this.source,
-      connected: this.connected,
-      lastEventAt: this.lastRealEventAt ?? this.lastEventAt,
+      connected: this.connected && this.state === "connected" && this.getLastRealEventAgeSeconds() <= Math.ceil(this.staleMs / 1000),
+      state: this.state,
+      lastEventAt: this.lastEventAt,
+      lastMessageAt: this.lastMessageAt,
+      lastRealEventAt: this.lastRealEventAt,
+      lastRealEventAgeSeconds: this.getLastRealEventAgeSeconds(),
+      wsReadyState: this.ws?.readyState,
+      reconnectCount: this.reconnectCount,
+      reconnectReason: this.currentReconnectReason,
+      fallbackMode: this.state !== "connected",
       warning: this.warning,
     };
   }
 
-  private scheduleReconnect(onEvent: (event: UnifiedTokenEvent) => void) {
-    if (this.reconnectTimer || this.reconnecting) return;
-    this.reconnecting = true;
-    onEvent({
-      eventId: `health:reconnect-scheduled:${Date.now()}`,
-      source: this.source,
-      eventType: "health",
-      timestamp: Date.now(),
-      warning: "reconnect scheduled",
-    });
+  private connect(reason: string) {
+    if (this.stopped) return;
+    this.fullTeardown(`connect:${reason}`, true);
+    this.transitionTo("connecting", reason);
+
+    const generation = ++this.wsGeneration;
+    const socket = new WebSocket("wss://pumpportal.fun/api/data");
+    this.ws = socket;
+
+    socket.addEventListener("open", () => this.handleOpen(generation));
+    socket.addEventListener("message", (message) => this.handleMessage(generation, message));
+    socket.addEventListener("close", (event) => this.handleClose(generation, event));
+    socket.addEventListener("error", (event) => this.handleError(generation, event));
+  }
+
+  private handleOpen(generation: number) {
+    if (!this.isCurrentGeneration(generation)) return;
+    this.connected = true;
+    this.warning = undefined;
+    this.lastConnectAt = Date.now();
+    this.lastMessageAt = Date.now();
+    this.lastRealEventAt = Date.now();
+    this.reconnectAttempt = 0;
+
+    this.transitionTo("connected", "websocket opened");
+
+    this.ws?.send(JSON.stringify({ method: "subscribeNewToken" }));
+    this.ws?.send(JSON.stringify({ method: "subscribeMigration" }));
+    for (const mint of this.subscribedMints) {
+      this.ws?.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+    }
+
+    this.emitHealth("websocket opened");
+    this.emitHealth(`subscriptions restored (${this.subscribedMints.size} tracked mints)`);
+
+    this.startHeartbeat();
+    this.startWatchdog();
+  }
+
+  private handleMessage(generation: number, message: MessageEvent) {
+    if (!this.isCurrentGeneration(generation)) return;
+    this.lastMessageAt = Date.now();
+
+    const raw = typeof message.data === "string" ? message.data : "";
+    if (!raw) return;
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      this.emitHealth("malformed payload ignored");
+      return;
+    }
+
+    const txType = typeof payload.txType === "string" ? payload.txType.toLowerCase() : "";
+    const eventType: UnifiedTokenEvent["eventType"] = txType.includes("migr")
+      ? "migrated"
+      : txType.includes("buy") || txType.includes("sell")
+        ? "trade"
+        : "discovered";
+
+    const normalized = normalizePumpPortalPayload(payload, eventType);
+    if (!normalized || !normalized.mintAddress) return;
+
+    if (eventType === "discovered") this.registerMint(normalized.mintAddress);
+
+    this.lastEventAt = Date.now();
+    this.lastRealEventAt = Date.now();
+    this.emitEvent(normalized);
+    this.emitHealth(`lastRealEventAt=${this.lastRealEventAt}`);
+  }
+
+  private handleClose(generation: number, event: CloseEvent) {
+    if (!this.isCurrentGeneration(generation)) return;
+    this.connected = false;
+    this.warning = `websocket closed code=${event.code} reason=${event.reason || "n/a"}`;
+    this.emitHealth(this.warning);
+    if (this.stopped) {
+      this.transitionTo("stopped", "closed after stop");
+      return;
+    }
+    this.forceReconnect("socket close");
+  }
+
+  private handleError(generation: number, _event: Event) {
+    if (!this.isCurrentGeneration(generation)) return;
+    this.connected = false;
+    this.warning = "websocket error";
+    this.transitionTo("errored", "socket error");
+    this.emitHealth("websocket error");
+    if (this.stopped) return;
+    this.forceReconnect("socket error");
+  }
+
+  private forceReconnect(reason: string) {
+    if (this.stopped) return;
+    this.currentReconnectReason = reason;
+    this.transitionTo("reconnecting", reason);
+    this.emitHealth(`reconnect scheduled (${reason})`);
+
+    this.fullTeardown(`forceReconnect:${reason}`, false);
+
+    this.reconnectCount += 1;
+    this.reconnectAttempt += 1;
+    const backoff = Math.min(this.reconnectBackoffMaxMs, this.reconnectBackoffBaseMs * 2 ** Math.max(0, this.reconnectAttempt - 1));
+
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
-      this.reconnectCount += 1;
-      onEvent({
-        eventId: `health:reconnect-started:${Date.now()}`,
-        source: this.source,
-        eventType: "health",
-        timestamp: Date.now(),
-        warning: "reconnect started",
-      });
-      if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
-        try {
-          this.ws.close();
-        } catch {
-          // ignore close errors
-        }
-      }
-      this.ws = null;
-      this.start(onEvent);
-    }, 3000);
+      if (this.stopped) return;
+      this.emitHealth(`reconnect started (${reason})`);
+      this.connect(reason);
+    }, backoff);
     this.reconnectTimer.unref();
   }
 
-  private startHeartbeat(onEvent: (event: UnifiedTokenEvent) => void) {
+  private startHeartbeat() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = setInterval(() => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      this.ws.send(JSON.stringify({ method: "ping" }));
-      onEvent({ eventId: `health:heartbeat:${Date.now()}`, source: this.source, eventType: "health", timestamp: Date.now() });
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        this.forceReconnect("missed heartbeat");
+        return;
+      }
+      try {
+        this.ws.send(JSON.stringify({ method: "ping" }));
+      } catch {
+        this.forceReconnect("heartbeat send failure");
+      }
     }, 15_000);
     this.heartbeatTimer.unref();
   }
 
-  private startWatchdog(onEvent: (event: UnifiedTokenEvent) => void) {
+  private startWatchdog() {
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     this.watchdogTimer = setInterval(() => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      const baseline = this.lastRealEventAt ?? this.lastMessageAt ?? Date.now();
-      const ageMs = Date.now() - baseline;
-      onEvent({
-        eventId: `health:watchdog:${Date.now()}`,
-        source: this.source,
-        eventType: "health",
-        timestamp: Date.now(),
-        warning: `lastRealEventAt=${baseline} ageMs=${ageMs}`,
-      });
+      if (!this.ws) {
+        this.forceReconnect("invalid readyState");
+        return;
+      }
+      if (this.ws.readyState !== WebSocket.OPEN && this.state === "connected") {
+        this.forceReconnect("invalid readyState");
+        return;
+      }
+
+      const ageMs = Date.now() - (this.lastRealEventAt ?? this.lastMessageAt ?? Date.now());
       if (ageMs > this.staleMs) {
-        this.warning = "PumpPortal stream stale, forcing reconnect";
-        onEvent({
-          eventId: `health:stale:${Date.now()}`,
-          source: this.source,
-          eventType: "health",
-          timestamp: Date.now(),
-          warning: "PumpPortal stream stale, forcing reconnect",
-        });
-        this.clearTimers();
-        try {
-          this.ws.close();
-        } catch {
-          // ignore close errors
-        }
-        this.ws = null;
-        this.connected = false;
-        this.scheduleReconnect(onEvent);
+        this.transitionTo("stale", "stale stream");
+        this.emitHealth("PumpPortal stream stale, forcing reconnect");
+        this.forceReconnect("stale stream");
       }
     }, this.watchdogIntervalMs);
     this.watchdogTimer.unref();
   }
 
-  private clearTimers() {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
-    this.heartbeatTimer = undefined;
-    this.watchdogTimer = undefined;
+  private fullTeardown(reason: string, keepReconnectTimer: boolean) {
+    if (!keepReconnectTimer && this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = undefined;
+    }
+
+    const socket = this.ws;
+    this.ws = null;
+
+    if (!socket) return;
+
+    try {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close(1000, reason);
+      }
+    } catch {
+      // ignore teardown errors
+    }
+  }
+
+  private transitionTo(next: PumpPortalConnectionState, reason: string) {
+    if (this.state === next) return;
+    this.emitHealth(`state ${this.state} -> ${next} (${reason})`);
+    this.state = next;
+  }
+
+  private emitHealth(warning: string) {
+    this.warning = warning;
+    this.emitEvent({
+      eventId: `health:${this.source}:${Date.now()}`,
+      source: this.source,
+      eventType: "health",
+      timestamp: Date.now(),
+      warning,
+    });
+  }
+
+  private emitEvent(event: UnifiedTokenEvent) {
+    this.onEventCallback?.(event);
+  }
+
+  private getLastRealEventAgeSeconds() {
+    if (!this.lastRealEventAt) return Number.POSITIVE_INFINITY;
+    return Math.floor((Date.now() - this.lastRealEventAt) / 1000);
+  }
+
+  private isCurrentGeneration(generation: number) {
+    return generation === this.wsGeneration;
   }
 }

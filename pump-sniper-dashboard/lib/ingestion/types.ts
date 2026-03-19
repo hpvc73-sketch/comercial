@@ -35,6 +35,14 @@ export interface SourceHealth {
   connected: boolean;
   enabled?: boolean;
   lastEventAt?: number;
+  lastMessageAt?: number;
+  lastRealEventAt?: number;
+  lastRealEventAgeSeconds?: number;
+  wsReadyState?: number;
+  reconnectCount?: number;
+  reconnectReason?: string;
+  state?: "idle" | "connecting" | "connected" | "stale" | "reconnecting" | "stopped" | "errored";
+  fallbackMode?: boolean;
   warning?: string;
 }
 

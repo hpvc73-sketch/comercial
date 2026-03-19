@@ -147,8 +147,16 @@ export type DataMode = "live" | "mock" | "unavailable";
 export interface SourceHealthView {
   source: ProviderSource;
   connected: boolean;
+  state?: "idle" | "connecting" | "connected" | "stale" | "reconnecting" | "stopped" | "errored";
   warning?: string;
   lastEventAt?: number;
+  lastMessageAt?: number;
+  lastRealEventAt?: number;
+  lastRealEventAgeSeconds?: number;
+  wsReadyState?: number;
+  reconnectCount?: number;
+  reconnectReason?: string;
+  fallbackMode?: boolean;
 }
 
 export interface Diagnostics {
