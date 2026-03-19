@@ -98,4 +98,8 @@ export class LiveStateStore {
   all(): LiveTokenState[] {
     return Array.from(this.tokens.values());
   }
+
+  delete(mintAddress: string): void {
+    this.tokens.delete(mintAddress);
+  }
 }

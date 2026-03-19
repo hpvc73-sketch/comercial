@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MonitorState, Signal, TokenSnapshot } from "../lib/monitorTypes";
+import { MonitorState, TokenSnapshot } from "../lib/monitorTypes";
 
 function fmtUsd(n: number | null | undefined) {
   if (typeof n !== "number" || Number.isNaN(n)) return "N/A";
@@ -38,6 +38,20 @@ function isVisibleMainRow(token: TokenSnapshot) {
     token.parsedTradeCount === 0;
 
   return token.visibleInMain && meaningful && !emptyWeak;
+}
+
+function selectMainTableTokens(tokens: TokenSnapshot[], resultCount: number) {
+  return tokens
+    .filter((token) => token.tier === "candidate" || token.tier === "tradable")
+    .sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt)
+    .slice(0, resultCount);
+}
+
+function selectSignalsTokens(tokens: TokenSnapshot[], resultCount: number) {
+  const tradable = tokens.filter((token) => token.tier === "tradable").sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt);
+  if (tradable.length > 0) return tradable.slice(0, resultCount);
+  const candidates = tokens.filter((token) => token.tier === "candidate").sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt);
+  return candidates.slice(0, Math.max(1, Math.min(resultCount, 10)));
 }
 
 async function fetchState(): Promise<MonitorState> {
@@ -130,13 +144,15 @@ export default function HomePage() {
     };
   }, []);
 
-  const { filteredTokens, hiddenTokens, filteredOut, filterDebug } = useMemo(() => {
+  const { filteredTokens, signalTokens, hiddenTokens, filteredOut, filterDebug, tierCounts } = useMemo(() => {
     if (!state) {
       return {
         filteredTokens: [],
+        signalTokens: [],
         hiddenTokens: [],
         filteredOut: 0,
         filterDebug: { risk: 0, state: 0, source: 0, weak: 0 },
+        tierCounts: { raw: 0, candidate: 0, tradable: 0, terminal: 0 },
       };
     }
 
@@ -202,8 +218,19 @@ export default function HomePage() {
       `[table-filter] excluded risk=${excludedByRisk} state=${excludedByState} source=${excludedBySource} weak=${excludedByWeak}`,
     );
 
+    const tierCounts = {
+      raw: state.tokens.filter((token) => token.tier === "raw_discovery" || token.tier === "raw_discovery_expired").length,
+      candidate: state.tokens.filter((token) => token.tier === "candidate").length,
+      tradable: state.tokens.filter((token) => token.tier === "tradable").length,
+      terminal: state.tokens.filter((token) => token.lifecycle === "rejected" || token.lifecycle === "expired").length,
+    };
+
+    const mainTokens = showDiscovered ? visible.sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt).slice(0, resultCount) : selectMainTableTokens(visible, resultCount);
+    const signalTokens = selectSignalsTokens(visible, resultCount);
+
     return {
-      filteredTokens: visible.sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt).slice(0, resultCount),
+      filteredTokens: mainTokens,
+      signalTokens,
       hiddenTokens: hidden.sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt),
       filteredOut: excludedByRisk + excludedByState + excludedBySource + excludedByWeak,
       filterDebug: {
@@ -212,6 +239,7 @@ export default function HomePage() {
         source: excludedBySource,
         weak: excludedByWeak,
       },
+      tierCounts,
     };
   }, [state, riskFilter, maxAgeFilter, resultCount, showDiscovered, hideExpiredRejected, onlyTradable, onlyEnriched, sourceFilter]);
 
@@ -234,9 +262,11 @@ export default function HomePage() {
       </p>
 
       <div style={{ display: "flex", gap: 16, marginBottom: 10, fontSize: 13, opacity: 0.9 }}>
-        <span>tokens discovered: <strong>{state.tokens.length}</strong></span>
-        <span>tokens shown: <strong>{filteredTokens.length}</strong></span>
-        <span>tokens filtered out: <strong>{filteredOut}</strong> (risk {filterDebug.risk}, state {filterDebug.state}, source {filterDebug.source}, weak {filterDebug.weak})</span>
+        <span>raw discovery hidden: <strong>{tierCounts.raw}</strong></span>
+        <span>candidate: <strong>{tierCounts.candidate}</strong></span>
+        <span>tradable: <strong>{tierCounts.tradable}</strong></span>
+        <span>rejected/expired: <strong>{tierCounts.terminal}</strong></span>
+        <span>filtered out: <strong>{filteredOut}</strong> (risk {filterDebug.risk}, state {filterDebug.state}, source {filterDebug.source}, weak {filterDebug.weak})</span>
       </div>
 
       <section style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
@@ -317,8 +347,8 @@ export default function HomePage() {
       ) : null}
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 12 }}>
-        <SignalsPanel signals={state.signals.slice(0, 30)} freshSignalIds={freshSignalIds} />
-        <Panel title="Trades" items={state.tradeHistory.slice(0, 20).map((trade) => `${trade.side.toUpperCase()} ${trade.tokenSymbol} (${trade.tokenName}) PnL ${fmtUsd(trade.pnlUsd)}`)} />
+        <SignalsPanel tokens={signalTokens} freshSignalIds={freshSignalIds} />
+        <Panel title="Trades" items={state.tradeHistory.length > 0 ? state.tradeHistory.slice(0, 20).map((trade) => `${trade.side.toUpperCase()} ${trade.tokenSymbol} (${trade.tokenName}) PnL ${fmtUsd(trade.pnlUsd)}`) : ["No parsed candidate trades yet"]} />
         <Panel title="Logs" items={state.logs.slice(0, 20)} />
       </section>
     </main>
@@ -371,26 +401,27 @@ function formatAge(seconds: number | null, quality: "exact" | "estimated" | "unk
   return quality === "estimated" ? `~${base}` : base;
 }
 
-function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {
+function SignalsPanel({ tokens, freshSignalIds }: { tokens: TokenSnapshot[]; freshSignalIds: Set<string> }) {
   return (
     <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, background: "#0f172a" }}>
-      <h3 style={{ marginTop: 0 }}>Sinais (live state)</h3>
+      <h3 style={{ marginTop: 0 }}>Signals (candidate/tradable)</h3>
       <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
-        {signals.map((signal) => {
-          const isFresh = freshSignalIds.has(signal.id);
+        {tokens.map((token) => {
+          const signalId = `${token.mintAddress}:${token.tier}`;
+          const isFresh = freshSignalIds.has(signalId);
           return (
-            <li key={signal.id} className={isFresh ? "signal-item signal-fresh" : "signal-item"}>
+            <li key={signalId} className={isFresh ? "signal-item signal-fresh" : "signal-item"}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
-                <a className="token-link" href={phantomLink(signal.mintAddress)} target="_blank" rel="noreferrer">
-                  <strong>{signal.tokenSymbol}</strong> <span style={{ opacity: 0.8 }}>({signal.tokenName})</span>
+                <a className="token-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
+                  <strong>{token.symbol}</strong> <span style={{ opacity: 0.8 }}>({token.name})</span>
                 </a>
-                <span style={{ opacity: 0.8 }}>{new Date(signal.createdAt).toLocaleTimeString("pt-PT")}</span>
+                <span style={{ opacity: 0.8 }}>{new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}</span>
               </div>
-              <a className="mint-link" href={phantomLink(signal.mintAddress)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
-                {signal.mintAddress}
+              <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
+                {token.mintAddress}
               </a>
               <div style={{ marginTop: 4, fontSize: 13 }}>
-                <strong>{signal.category}</strong> · buys/s <strong>{fmtNumber(signal.buysPerSecond, 2)}</strong> · price <strong>{fmtNumber(signal.price, 8)}</strong> · risco <strong>{signal.riskScore === null ? "N/A" : signal.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(signal.volumeUsd)}</strong> · parsed trades <strong>{signal.parsedTradeCount}</strong> · fonte <strong>{signal.source}</strong> · status <strong>{signal.confirmationStatus}</strong>
+                <strong>{token.tier}</strong> · buys/s <strong>{fmtNumber(token.buysPerSecond, 2)}</strong> · price <strong>{fmtNumber(token.price, 8)}</strong> · risco <strong>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(token.volumeUsd)}</strong> · parsed trades <strong>{token.parsedTradeCount}</strong> · source <strong>{token.sourceCategory}</strong> · status <strong>{token.lifecycle}</strong>
               </div>
             </li>
           );

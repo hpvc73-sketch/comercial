@@ -23,9 +23,11 @@ const MAX_RECENT_TRADES = 120;
 const MIN_UNIQUE_WALLETS_FOR_ENTRY = 20;
 const HARD_MAX_TOKEN_AGE_SECONDS = 120;
 const FRESH_TOKEN_AGE_SECONDS = 30;
-const DISCOVERED_TIMEOUT_MS = Number(process.env.DISCOVERED_TIMEOUT_MS ?? 8000);
+const DISCOVERED_TIMEOUT_MS = Number(process.env.DISCOVERED_TIMEOUT_MS ?? 5000);
 const DISCOVERY_PRIMARY = process.env.DISCOVERY_PRIMARY ?? "pumpportal";
 const ALLOW_HELIUS_RPC_DISCOVERY = process.env.ALLOW_HELIUS_RPC_DISCOVERY === "true";
+const HELIUS_VISIBLE_CANDIDATES = process.env.HELIUS_VISIBLE_CANDIDATES === "true";
+const RAW_DISCOVERY_RETENTION_MS = Number(process.env.RAW_DISCOVERY_RETENTION_MS ?? 60_000);
 
 const DEFAULT_SETTINGS: MonitorSettings = {
   paperBankrollUsd: 5000,
@@ -119,6 +121,7 @@ class MonitorEngine extends EventEmitter {
       "PUMPFUN_PROGRAM_ID",
       "DISCOVERY_PRIMARY",
       "ALLOW_HELIUS_RPC_DISCOVERY",
+      "HELIUS_VISIBLE_CANDIDATES",
       "DISCOVERED_TIMEOUT_MS",
     ]
       .filter((key) => Boolean(process.env[key]));
@@ -230,6 +233,29 @@ class MonitorEngine extends EventEmitter {
     if (hasPumpSignal) return true;
     if (ALLOW_HELIUS_RPC_DISCOVERY && hasKnownAge && hasMetadata) return true;
     return hasParsedTrade && hasKnownAge && hasMetadata;
+  }
+
+  private deriveTokenTier(input: {
+    lifecycle: TokenSnapshot["lifecycle"];
+    parsedTradeCount: number;
+    recentTradesCount: number;
+    ageSource: TokenSnapshot["ageSource"];
+    hasKnownMetadata: boolean;
+    uniqueWallets: number;
+    volumeUsd: number | null;
+    buysPerSecond: number | null;
+    isTradable: boolean;
+    weakDiscoveryExpired: boolean;
+  }): TokenSnapshot["tier"] {
+    if (input.isTradable) return "tradable";
+    if (input.weakDiscoveryExpired) return "raw_discovery_expired";
+    const hasAge = input.ageSource !== "unknown";
+    const hasTrade = input.parsedTradeCount >= 1 || input.recentTradesCount >= 1;
+    const hasUsefulMetric = input.uniqueWallets > 0 || input.volumeUsd !== null || input.buysPerSecond !== null;
+    if (input.lifecycle !== "rejected" && input.lifecycle !== "expired" && hasTrade && hasAge && (input.hasKnownMetadata || hasUsefulMetric)) {
+      return "candidate";
+    }
+    return "raw_discovery";
   }
 
   private onUnifiedEvent(event: UnifiedTokenEvent) {
@@ -510,6 +536,7 @@ class MonitorEngine extends EventEmitter {
         else if (Date.now() - token.updatedAt > 180_000) lifecycle = "expired";
         else if (hadTradeObservation) lifecycle = "enriching";
         if (lifecycle === "enriching" && (token.parsedTradeCount >= 1 || hasRealMetrics)) lifecycle = "enriched";
+        const weakDiscoveryExpired = lifecycle === "discovered" && discoveredTimedOut && !hadTradeObservation && !hasKnownMetadata;
         if (lifecycle === "discovered" && discoveredTimedOut && !hadTradeObservation && !hasKnownMetadata) {
           lifecycle = "rejected";
           token.rejectionReason = token.rejectionReason ?? "discovery timeout without enrichment";
@@ -533,10 +560,30 @@ class MonitorEngine extends EventEmitter {
         }
         token.lifecycle = lifecycle;
         const sourceCategory = this.sourceCategory(token);
+        const tier = this.deriveTokenTier({
+          lifecycle,
+          parsedTradeCount: token.parsedTradeCount,
+          recentTradesCount: token.recentTrades.length,
+          ageSource: chosenAgeSource,
+          hasKnownMetadata,
+          uniqueWallets: token.buyerWallets.size,
+          volumeUsd: token.volumeUsd,
+          buysPerSecond,
+          isTradable: lifecycle === "tradable",
+          weakDiscoveryExpired,
+        });
         const visibleByPrimary = this.canBeVisibleWithPrimaryRules(token, chosenAgeSource);
         const hasUsefulMetric = token.priceUsd !== null || token.volumeUsd !== null || buysPerSecond !== null || token.buyerWallets.size > 0;
+        const heliusOnly = sourceCategory === "helius-enriched" && !token.detectedAtBySource.has("pumpportal");
+        const heliusCandidateAllowed =
+          !heliusOnly ||
+          HELIUS_VISIBLE_CANDIDATES ||
+          (token.parsedTradeCount >= 1 && chosenAgeSource !== "unknown" && hasKnownMetadata && hasUsefulMetric);
         const visibleInMain =
+          tier !== "raw_discovery" &&
+          tier !== "raw_discovery_expired" &&
           visibleByPrimary &&
+          heliusCandidateAllowed &&
           (lifecycle === "enriched" ||
             lifecycle === "tradable" ||
             token.parsedTradeCount >= 1 ||
@@ -582,6 +629,7 @@ class MonitorEngine extends EventEmitter {
           discoveryStatus: token.discoveryStatus,
           confirmationStatus: token.confirmationStatus,
           lifecycle,
+          tier,
           sniperReady,
           parsedTradeCount: token.parsedTradeCount,
           isValidPumpCandidate: true,
@@ -664,6 +712,12 @@ class MonitorEngine extends EventEmitter {
     for (const token of this.store.all()) {
       if (token.updatedAt < staleCutoff && token.discoveryStatus !== "migrated") {
         token.discoveryStatus = "stale";
+      }
+      if (
+        token.rejectionReason === "discovery timeout without enrichment" &&
+        Date.now() - token.updatedAt > RAW_DISCOVERY_RETENTION_MS
+      ) {
+        this.store.delete(token.mintAddress);
       }
     }
     this.refreshStateFromStore();

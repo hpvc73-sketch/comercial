@@ -16,6 +16,7 @@ export interface TokenSnapshot {
   discoveryStatus: "discovered" | "migrated" | "stale";
   confirmationStatus: "unconfirmed" | "confirmed";
   lifecycle: "discovered" | "enriching" | "enriched" | "tradable" | "rejected" | "expired";
+  tier: "raw_discovery" | "candidate" | "tradable" | "raw_discovery_expired";
   sniperReady: boolean;
   parsedTradeCount: number;
   isValidPumpCandidate: boolean;
