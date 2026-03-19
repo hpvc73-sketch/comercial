@@ -28,7 +28,19 @@ export class SolanaRpcAdapter implements SourceAdapter {
       this.warning = "SOLANA_RPC_URL não configurado (obrigatório).";
       return;
     }
-    if (this.ws || this.httpFallbackTimer) return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+    if (this.ws && (this.ws.readyState === WebSocket.CLOSING || this.ws.readyState === WebSocket.CLOSED)) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore stale socket close errors
+      }
+      this.ws = null;
+    }
+    if (this.httpFallbackTimer) {
+      clearInterval(this.httpFallbackTimer);
+      this.httpFallbackTimer = undefined;
+    }
     this.connectWs(onEvent);
   }
 
