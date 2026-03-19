@@ -35,7 +35,8 @@ export interface LiveTokenState {
   }>;
   pumpPortalTradeCount: number;
   parsedTradeCount: number;
-  lifecycle: "discovered" | "enriched" | "tradable";
+  lifecycle: "discovered" | "enriching" | "enriched" | "tradable" | "rejected" | "expired";
+  rejectionReason?: string;
   enrichmentWarning?: string;
   detectedAtBySource: Map<DataSource, number>;
   firstDetectedSource: DataSource;

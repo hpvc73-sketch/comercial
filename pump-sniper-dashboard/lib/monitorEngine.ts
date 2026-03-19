@@ -37,6 +37,7 @@ const DEFAULT_SETTINGS: MonitorSettings = {
     trailingStopPct: 8,
     cooldownSeconds: 120,
     maxTradesPerHour: 8,
+    executionMode: "paper",
   },
 };
 
@@ -352,7 +353,21 @@ class MonitorEngine extends EventEmitter {
         const buysInWindow = token.buyTimestamps.filter((ts) => ts >= windowStart).length;
         const buysPerSecondRaw = buysInWindow / (BUY_WINDOW_MS / 1000);
         const buysPerSecond = buysInWindow > 0 ? Number(buysPerSecondRaw.toFixed(2)) : null;
+        const buys15s = token.buyTimestamps.filter((ts) => ts >= now - 15_000).length;
+        const buys30s = token.buyTimestamps.filter((ts) => ts >= now - 30_000).length;
+        const buysPerSecond15s = buys15s > 0 ? Number((buys15s / 15).toFixed(2)) : null;
         const curveSlope = Number(((buysPerSecond ?? 0) * 1.2 - token.sells * 0.4).toFixed(2));
+        const trades5s = token.recentTrades.filter((trade) => trade.timestamp >= now - 5_000);
+        const trades15s = token.recentTrades.filter((trade) => trade.timestamp >= now - 15_000);
+        const trades30s = token.recentTrades.filter((trade) => trade.timestamp >= now - 30_000);
+        const volume5s = trades5s.reduce((sum, trade) => sum + (trade.usdAmount ?? 0), 0);
+        const volume15s = trades15s.reduce((sum, trade) => sum + (trade.usdAmount ?? 0), 0);
+        const volume30s = trades30s.reduce((sum, trade) => sum + (trade.usdAmount ?? 0), 0);
+        const uniqueBuyers30s = new Set(trades30s.filter((t) => t.side === "buy").map((t) => t.wallet).filter(Boolean)).size;
+        const uniqueTraders30s = new Set(trades30s.map((t) => t.wallet).filter(Boolean)).size;
+        const parsedBuysTotal = token.buyTimestamps.length;
+        const parsedSellsTotal = token.sellTimestamps.length;
+        const parsedTradesTotal = token.recentTrades.length;
 
         const totalTraderVolume = Array.from(token.traderVolumeUsd.values()).reduce((sum, value) => sum + value, 0);
         const topTraderVolume = token.traderVolumeUsd.size > 0 ? Math.max(...token.traderVolumeUsd.values()) : 0;
@@ -407,14 +422,43 @@ class MonitorEngine extends EventEmitter {
         }
         const realAgeQuality: TokenSnapshot["realAgeQuality"] =
           chosenAgeSource === "unknown" ? "unknown" : chosenAgeSource === "estimated" ? "estimated" : "exact";
-        const lifecycle: TokenSnapshot["lifecycle"] =
-          token.parsedTradeCount >= 1 && hasRealAge ? "tradable" : token.parsedTradeCount >= 1 ? "enriched" : "discovered";
+        let lifecycle: TokenSnapshot["lifecycle"] = "discovered";
+        if (token.rejectionReason) lifecycle = "rejected";
+        else if (Date.now() - token.updatedAt > 180_000) lifecycle = "expired";
+        else if (token.parsedTradeCount > 0) lifecycle = "enriched";
+        else if (token.recentTrades.length > 0) lifecycle = "enriching";
+
+        if (
+          lifecycle !== "rejected" &&
+          lifecycle !== "expired" &&
+          hasRealAge &&
+          realTokenAgeSeconds !== null &&
+          realTokenAgeSeconds <= HARD_MAX_TOKEN_AGE_SECONDS &&
+          token.parsedTradeCount >= 1 &&
+          token.volumeUsd !== null &&
+          token.priceUsd !== null
+        ) {
+          lifecycle = "tradable";
+        }
         token.lifecycle = lifecycle;
         const sniperReady =
           lifecycle === "tradable" &&
           chosenAgeSource !== "estimated" &&
           realTokenAgeSeconds !== null &&
           realTokenAgeSeconds <= HARD_MAX_TOKEN_AGE_SECONDS;
+        const liquidityEstimate = volume30s > 0 ? Number((volume30s / 30).toFixed(2)) : null;
+        const sourceConfidence: TokenSnapshot["sourceConfidence"] =
+          token.detectedAtBySource.size >= 2 ? "dual-source" : "single-source";
+        const signalScore = this.computeSignalScore({
+          realTokenAgeSeconds,
+          buysPerSecond: buysPerSecond ?? buysPerSecond15s,
+          uniqueBuyers30s,
+          volume30s,
+          hasMetadata: token.symbol !== "UNKNOWN" && token.name !== "Unknown Token",
+          sourceConfidence,
+        });
+        const confidenceLevel = Math.min(100, Math.max(0, signalScore));
+
         if (realTokenAgeSeconds !== null && realTokenAgeSeconds > HARD_MAX_TOKEN_AGE_SECONDS && !this.staleAgeWarned.has(token.mintAddress)) {
           this.staleAgeWarned.add(token.mintAddress);
           this.log(`rejected as stale because of real age ${realTokenAgeSeconds}s source=${chosenAgeSource} ${token.mintAddress}`);
@@ -446,9 +490,26 @@ class MonitorEngine extends EventEmitter {
           freshness,
           lastMetricUpdateAt: token.updatedAt,
           price: token.priceUsd !== null ? Number(token.priceUsd.toFixed(8)) : null,
+          volume5s: volume5s > 0 ? Number(volume5s.toFixed(2)) : null,
+          volume15s: volume15s > 0 ? Number(volume15s.toFixed(2)) : null,
+          volume30s: volume30s > 0 ? Number(volume30s.toFixed(2)) : null,
           volumeUsd: token.volumeUsd !== null ? Number(token.volumeUsd.toFixed(2)) : null,
+          buys5s: buysInWindow,
+          buys15s,
+          buys30s,
+          buysPerSecond15s,
           buysPerSecond,
+          parsedTradesTotal,
+          parsedBuysTotal,
+          parsedSellsTotal,
+          confidenceLevel,
+          signalScore,
+          liquidityEstimate,
+          rejectionReason: token.rejectionReason,
+          sourceConfidence,
           uniqueWallets: token.buyerWallets.size > 0 ? token.buyerWallets.size : null,
+          uniqueBuyers30s,
+          uniqueTraders30s,
           dataQuality,
           topWalletShare,
           curveSlope,
@@ -532,6 +593,8 @@ class MonitorEngine extends EventEmitter {
       volumeUsd: token.volumeUsd,
       price: token.price,
       parsedTradeCount: token.parsedTradeCount,
+      score: token.signalScore,
+      suggestedAction: token.signalScore >= 65 ? "buy" : token.signalScore >= 40 ? "watch" : "ignore",
       source: token.source,
       confirmationStatus: token.confirmationStatus,
     };
@@ -577,6 +640,8 @@ class MonitorEngine extends EventEmitter {
       volumeUsd: token.volumeUsd,
       price: token.price,
       parsedTradeCount: token.parsedTradeCount,
+      score: token.signalScore,
+      suggestedAction: "buy",
       source: token.source,
       confirmationStatus: token.confirmationStatus,
     };
@@ -677,6 +742,32 @@ class MonitorEngine extends EventEmitter {
     this.state.tradeHistory = this.state.tradeHistory.slice(0, 200);
   }
 
+  private computeSignalScore(input: {
+    realTokenAgeSeconds: number | null;
+    buysPerSecond: number | null;
+    uniqueBuyers30s: number;
+    volume30s: number;
+    hasMetadata: boolean;
+    sourceConfidence: "single-source" | "dual-source";
+  }): number {
+    const ageScore =
+      input.realTokenAgeSeconds === null
+        ? 0
+        : input.realTokenAgeSeconds <= 10
+          ? 30
+          : input.realTokenAgeSeconds <= 30
+            ? 22
+            : input.realTokenAgeSeconds <= 120
+              ? 10
+              : 0;
+    const buyScore = Math.min(20, Math.round((input.buysPerSecond ?? 0) * 6));
+    const walletScore = Math.min(15, input.uniqueBuyers30s);
+    const volumeScore = Math.min(20, Math.round(input.volume30s / 150));
+    const metadataScore = input.hasMetadata ? 10 : 0;
+    const sourceScore = input.sourceConfidence === "dual-source" ? 5 : 2;
+    return ageScore + buyScore + walletScore + volumeScore + metadataScore + sourceScore;
+  }
+
   private deriveAgeEvidence(token: LiveTokenState): {
     source: TokenSnapshot["ageSource"];
     createdAt: number | null;
@@ -744,8 +835,8 @@ class MonitorEngine extends EventEmitter {
 
       const signatures = await this.fetchHistoricalSignatures(mintAddress, 4, 100);
       if (!signatures || signatures.length === 0) {
-        token.lifecycle = "discovered";
-        return;
+      token.lifecycle = "enriching";
+      return;
       }
 
       let earliestBlockTimeMs = Number.POSITIVE_INFINITY;
@@ -802,11 +893,12 @@ class MonitorEngine extends EventEmitter {
         token.lifecycle = "enriched";
         this.log(`helius enriched ${mintAddress}: parsedTrades=${parsedTrades}, wallets=${wallets.size}`);
       } else {
-        token.lifecycle = "discovered";
+        token.lifecycle = "enriching";
       }
     } catch (error) {
       const message = (error as Error).message ?? "unknown error";
       token.enrichmentWarning = message;
+      token.rejectionReason = `enrichment failed: ${message}`;
       if (message.includes("429") || message.includes("403")) {
         this.log(`Helius enrichment limited by plan/rate limits (${message}); degrading gracefully.`);
       } else {

@@ -15,7 +15,7 @@ export interface TokenSnapshot {
   sourceLatencyMs: Record<string, number>;
   discoveryStatus: "discovered" | "migrated" | "stale";
   confirmationStatus: "unconfirmed" | "confirmed";
-  lifecycle: "discovered" | "enriched" | "tradable";
+  lifecycle: "discovered" | "enriching" | "enriched" | "tradable" | "rejected" | "expired";
   sniperReady: boolean;
   parsedTradeCount: number;
   isValidPumpCandidate: boolean;
@@ -34,9 +34,26 @@ export interface TokenSnapshot {
   freshness: "fresh" | "aging" | "late" | "unknown";
   lastMetricUpdateAt: number;
   price: number | null;
+  volume5s: number | null;
+  volume15s: number | null;
+  volume30s: number | null;
   volumeUsd: number | null;
+  buys5s: number;
+  buys15s: number;
+  buys30s: number;
+  buysPerSecond15s: number | null;
   buysPerSecond: number | null;
+  parsedTradesTotal: number;
+  parsedBuysTotal: number;
+  parsedSellsTotal: number;
+  confidenceLevel: number;
+  signalScore: number;
+  liquidityEstimate: number | null;
+  rejectionReason?: string;
+  sourceConfidence: "single-source" | "dual-source";
   uniqueWallets: number | null;
+  uniqueBuyers30s: number;
+  uniqueTraders30s: number;
   dataQuality: "low" | "partial" | "complete";
   topWalletShare: number | null;
   curveSlope: number;
@@ -62,6 +79,8 @@ export interface Signal {
   volumeUsd: number | null;
   price: number | null;
   parsedTradeCount: number;
+  score: number;
+  suggestedAction: "ignore" | "watch" | "buy";
 }
 
 export interface Position {
@@ -111,6 +130,7 @@ export interface StrategyConfig {
   trailingStopPct?: number;
   cooldownSeconds: number;
   maxTradesPerHour: number;
+  executionMode?: "disabled" | "paper" | "live_manual_confirm" | "live_auto";
 }
 
 export interface MonitorSettings {

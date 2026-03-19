@@ -116,6 +116,10 @@ export default function HomePage() {
 
     const tokens = state.tokens.filter((token) => {
       if (!token.isValidPumpCandidate) return false;
+      if (!["enriched", "tradable"].includes(token.lifecycle)) {
+        excludedByState += 1;
+        return false;
+      }
       if (token.realTokenAgeSeconds !== null && token.realTokenAgeSeconds > maxAgeFilter) {
         excludedByState += 1;
         return false;
@@ -141,6 +145,11 @@ export default function HomePage() {
       },
     };
   }, [state, riskFilter, maxAgeFilter]);
+
+  const discoveryTokens = useMemo(
+    () => (state ? state.tokens.filter((token) => token.lifecycle === "discovered" || token.lifecycle === "enriching").slice(0, 20) : []),
+    [state],
+  );
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -249,6 +258,17 @@ export default function HomePage() {
           {filteredTokens.map((token) => <TokenRow key={token.mintAddress} token={token} />)}
         </tbody>
       </table>
+
+      <section style={{ marginBottom: 18 }}>
+        <h3>Discovery / Debug (não tradáveis ainda)</h3>
+        <ul>
+          {discoveryTokens.map((token) => (
+            <li key={`discovery-${token.mintAddress}`}>
+              {token.symbol} ({token.mintAddress.slice(0, 6)}...) · state={token.lifecycle} · age={formatAge(token.realTokenAgeSeconds, token.realAgeQuality)} · source={token.ageSource}
+            </li>
+          ))}
+        </ul>
+      </section>
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 12 }}>
         <SignalsPanel signals={state.signals.slice(0, 30)} freshSignalIds={freshSignalIds} />
