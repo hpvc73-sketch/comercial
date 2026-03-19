@@ -51,6 +51,9 @@ export interface TokenSnapshot {
   liquidityEstimate: number | null;
   rejectionReason?: string;
   sourceConfidence: "single-source" | "dual-source";
+  metadataSource: ProviderSource;
+  sourceCategory: "pumpportal" | "merged" | "helius-enriched";
+  visibleInMain: boolean;
   uniqueWallets: number | null;
   uniqueBuyers30s: number;
   uniqueTraders30s: number;

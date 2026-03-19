@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MonitorState, Signal, TokenSnapshot } from "../lib/monitorTypes";
 
 function fmtUsd(n: number | null | undefined) {
@@ -17,6 +17,29 @@ function phantomLink(mintAddress: string) {
   return `https://trade.phantom.com/token/${mintAddress}`;
 }
 
+function isVisibleMainRow(token: TokenSnapshot) {
+  const hasUsefulMetric = token.price !== null || token.volumeUsd !== null || token.buysPerSecond !== null || token.uniqueWallets !== null;
+  const hasKnownMetadata =
+    (token.symbol && token.symbol.toUpperCase() !== "UNKNOWN") ||
+    (token.name && token.name.toLowerCase() !== "unknown token");
+  const hasKnownAge = token.ageSource !== "unknown" && token.realTokenAgeSeconds !== null;
+  const meaningful =
+    token.lifecycle === "enriched" ||
+    token.lifecycle === "tradable" ||
+    token.parsedTradeCount >= 1 ||
+    token.parsedTradesTotal >= 1 ||
+    (hasKnownMetadata && hasKnownAge && hasUsefulMetric);
+  const emptyWeak =
+    !hasKnownMetadata &&
+    !hasKnownAge &&
+    token.price === null &&
+    token.volumeUsd === null &&
+    token.buysPerSecond === null &&
+    token.parsedTradeCount === 0;
+
+  return token.visibleInMain && meaningful && !emptyWeak;
+}
+
 async function fetchState(): Promise<MonitorState> {
   const res = await fetch("/api/monitor/state", { cache: "no-store" });
   if (!res.ok) throw new Error("Falha a obter estado");
@@ -27,6 +50,13 @@ export default function HomePage() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [riskFilter, setRiskFilter] = useState(70);
   const [maxAgeFilter, setMaxAgeFilter] = useState(60);
+  const [resultCount, setResultCount] = useState(20);
+  const [showDiscovered, setShowDiscovered] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [onlyTradable, setOnlyTradable] = useState(false);
+  const [onlyEnriched, setOnlyEnriched] = useState(false);
+  const [hideExpiredRejected, setHideExpiredRejected] = useState(true);
+  const [sourceFilter, setSourceFilter] = useState<"all" | "pumpportal" | "merged" | "helius-enriched">("all");
   const [status, setStatus] = useState<"connecting" | "connected" | "fallback">("connecting");
   const [freshSignalIds, setFreshSignalIds] = useState<Set<string>>(new Set());
   const seenSignalIds = useRef<Set<string>>(new Set());
@@ -100,80 +130,90 @@ export default function HomePage() {
     };
   }, []);
 
-  const { filteredTokens, filteredOut, filterDebug } = useMemo(() => {
+  const { filteredTokens, hiddenTokens, filteredOut, filterDebug } = useMemo(() => {
     if (!state) {
       return {
         filteredTokens: [],
+        hiddenTokens: [],
         filteredOut: 0,
-        filterDebug: { risk: 0, volume: 0, missingMetrics: 0, state: 0 },
+        filterDebug: { risk: 0, state: 0, source: 0, weak: 0 },
       };
     }
 
     let excludedByRisk = 0;
-    let excludedByVolume = 0;
-    const excludedByMissingMetrics = 0;
     let excludedByState = 0;
+    let excludedBySource = 0;
+    let excludedByWeak = 0;
 
-    const tokens = state.tokens.filter((token) => {
-      if (!token.isValidPumpCandidate) return false;
-      if (!["enriched", "tradable"].includes(token.lifecycle)) {
+    const visible: TokenSnapshot[] = [];
+    const hidden: TokenSnapshot[] = [];
+
+    for (const token of state.tokens) {
+      if (!token.isValidPumpCandidate) continue;
+      if (!isVisibleMainRow(token)) {
+        excludedByWeak += 1;
+        hidden.push(token);
+        continue;
+      }
+      if (hideExpiredRejected && (token.lifecycle === "expired" || token.lifecycle === "rejected")) {
         excludedByState += 1;
-        return false;
+        hidden.push(token);
+        continue;
+      }
+      if (!showDiscovered && token.lifecycle === "discovered") {
+        excludedByState += 1;
+        hidden.push(token);
+        continue;
+      }
+      if (onlyTradable && token.lifecycle !== "tradable") {
+        excludedByState += 1;
+        hidden.push(token);
+        continue;
+      }
+      if (onlyEnriched && !["enriched", "tradable"].includes(token.lifecycle)) {
+        excludedByState += 1;
+        hidden.push(token);
+        continue;
+      }
+      if (sourceFilter !== "all" && token.sourceCategory !== sourceFilter) {
+        excludedBySource += 1;
+        hidden.push(token);
+        continue;
       }
       if (token.realTokenAgeSeconds !== null && token.realTokenAgeSeconds > maxAgeFilter) {
         excludedByState += 1;
-        return false;
+        hidden.push(token);
+        continue;
       }
-      if (token.riskScore === null) return true;
+      if (token.riskScore === null) {
+        visible.push(token);
+        continue;
+      }
       const include = token.riskScore <= riskFilter;
-      if (!include) excludedByRisk += 1;
-      return include;
-    });
+      if (!include) {
+        excludedByRisk += 1;
+        hidden.push(token);
+        continue;
+      }
+      visible.push(token);
+    }
 
     console.debug(
-      `[table-filter] excluded by risk filter: ${excludedByRisk}, volume: ${excludedByVolume}, missing metrics: ${excludedByMissingMetrics}, state: ${excludedByState}`,
+      `[table-filter] excluded risk=${excludedByRisk} state=${excludedByState} source=${excludedBySource} weak=${excludedByWeak}`,
     );
 
     return {
-      filteredTokens: tokens.slice(0, 80),
-      filteredOut: excludedByRisk + excludedByVolume + excludedByMissingMetrics + excludedByState,
+      filteredTokens: visible.sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt).slice(0, resultCount),
+      hiddenTokens: hidden.sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt),
+      filteredOut: excludedByRisk + excludedByState + excludedBySource + excludedByWeak,
       filterDebug: {
         risk: excludedByRisk,
-        volume: excludedByVolume,
-        missingMetrics: excludedByMissingMetrics,
         state: excludedByState,
+        source: excludedBySource,
+        weak: excludedByWeak,
       },
     };
-  }, [state, riskFilter, maxAgeFilter]);
-
-  const discoveryTokens = useMemo(
-    () => (state ? state.tokens.filter((token) => token.lifecycle === "discovered" || token.lifecycle === "enriching").slice(0, 20) : []),
-    [state],
-  );
-
-  async function saveSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const fd = new FormData(event.currentTarget);
-
-    await fetch("/api/monitor/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        paperBankrollUsd: Number(fd.get("paperBankrollUsd")),
-        strategy: {
-          entryUsdSize: Number(fd.get("entryUsdSize")),
-          maxRiskScore: Number(fd.get("maxRiskScore")),
-          takeProfitPct: Number(fd.get("takeProfitPct")),
-          stopLossPct: Number(fd.get("stopLossPct")),
-          trailingStopPct: Number(fd.get("trailingStopPct")),
-          cooldownSeconds: Number(fd.get("cooldownSeconds")),
-          maxTradesPerHour: Number(fd.get("maxTradesPerHour")),
-          minBuysPerSecond: Number(fd.get("minBuysPerSecond")),
-          minVolumeUsd: Number(fd.get("minVolumeUsd")),
-        },
-      }),
-    });
-  }
+  }, [state, riskFilter, maxAgeFilter, resultCount, showDiscovered, hideExpiredRejected, onlyTradable, onlyEnriched, sourceFilter]);
 
   if (!state) return <main style={{ padding: 24 }}>A ligar ao motor de monitorização...</main>;
 
@@ -196,7 +236,7 @@ export default function HomePage() {
       <div style={{ display: "flex", gap: 16, marginBottom: 10, fontSize: 13, opacity: 0.9 }}>
         <span>tokens discovered: <strong>{state.tokens.length}</strong></span>
         <span>tokens shown: <strong>{filteredTokens.length}</strong></span>
-        <span>tokens filtered out: <strong>{filteredOut}</strong> (risk {filterDebug.risk}, volume {filterDebug.volume}, missing {filterDebug.missingMetrics}, state {filterDebug.state})</span>
+        <span>tokens filtered out: <strong>{filteredOut}</strong> (risk {filterDebug.risk}, state {filterDebug.state}, source {filterDebug.source}, weak {filterDebug.weak})</span>
       </div>
 
       <section style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
@@ -208,67 +248,73 @@ export default function HomePage() {
         <div>providers initialized: {state.diagnostics.providersInitialized.join(", ") || "none"}</div>
         <div>providers skipped: {state.diagnostics.providersSkipped.join(", ") || "none"}</div>
       </section>
-      <section style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12, marginBottom: 18 }}>
-        <Card label="Saldo virtual" value={fmtUsd(state.balances.paperUsd)} />
-        <Card label="PnL paper diário" value={fmtUsd(state.metrics.realizedPnlPaper)} />
-        <Card label="Sinais diários" value={String(state.metrics.totalSignals)} />
-        <Card label="Trades paper diários" value={String(state.metrics.paperTrades)} />
+      <section style={{ border: "1px solid #334155", borderRadius: 8, padding: 12, marginBottom: 12, background: "#0f172a" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 10, alignItems: "end" }}>
+          <label style={{ display: "grid", gap: 4 }}>
+            <small>source mode</small>
+            <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value as "all" | "pumpportal" | "merged" | "helius-enriched")}>
+              <option value="all">all</option>
+              <option value="pumpportal">pumpportal</option>
+              <option value="merged">merged</option>
+              <option value="helius-enriched">helius-enriched</option>
+            </select>
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <small>result count</small>
+            <select value={resultCount} onChange={(e) => setResultCount(Number(e.target.value))}>
+              {[10, 20, 50, 100].map((count) => <option key={count} value={count}>{count}</option>)}
+            </select>
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <small>risk max ≤ {riskFilter}</small>
+            <input type="range" min={0} max={100} value={riskFilter} onChange={(e) => setRiskFilter(Number(e.target.value))} />
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <small>age max {maxAgeFilter}s</small>
+            <input type="range" min={10} max={120} step={5} value={maxAgeFilter} onChange={(e) => setMaxAgeFilter(Number(e.target.value))} />
+          </label>
+        </div>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 10, fontSize: 13 }}>
+          <label><input type="checkbox" checked={onlyTradable} onChange={(e) => setOnlyTradable(e.target.checked)} /> only tradable</label>
+          <label><input type="checkbox" checked={onlyEnriched} onChange={(e) => setOnlyEnriched(e.target.checked)} /> only enriched</label>
+          <label><input type="checkbox" checked={!showDiscovered} onChange={(e) => setShowDiscovered(!e.target.checked)} /> hide discovered</label>
+          <label><input type="checkbox" checked={hideExpiredRejected} onChange={(e) => setHideExpiredRejected(e.target.checked)} /> hide expired/rejected</label>
+          <label><input type="checkbox" checked={showDebug} onChange={(e) => setShowDebug(e.target.checked)} /> show debug</label>
+          <span>auto refresh: <strong>{status === "connected" ? "SSE live" : "fallback polling"}</strong></span>
+        </div>
       </section>
-
-      <form onSubmit={saveSettings} style={{ display: "grid", gridTemplateColumns: "repeat(5,minmax(0,1fr))", gap: 10, marginBottom: 14 }}>
-        <Input name="paperBankrollUsd" label="Banca virtual" defaultValue={state.settings.paperBankrollUsd} />
-        <Input name="entryUsdSize" label="Entrada $" defaultValue={state.settings.strategy.entryUsdSize} />
-        <Input name="maxRiskScore" label="Risco máx." defaultValue={state.settings.strategy.maxRiskScore} />
-        <Input name="takeProfitPct" label="Take profit %" defaultValue={state.settings.strategy.takeProfitPct} />
-        <Input name="stopLossPct" label="Stop loss %" defaultValue={state.settings.strategy.stopLossPct} />
-        <Input name="trailingStopPct" label="Trailing %" defaultValue={state.settings.strategy.trailingStopPct ?? 0} />
-        <Input name="cooldownSeconds" label="Cooldown (s)" defaultValue={state.settings.strategy.cooldownSeconds} />
-        <Input name="maxTradesPerHour" label="Trades / hora" defaultValue={state.settings.strategy.maxTradesPerHour} />
-        <Input name="minBuysPerSecond" label="Min buys/s" defaultValue={state.settings.strategy.minBuysPerSecond} />
-        <Input name="minVolumeUsd" label="Volume mínimo" defaultValue={state.settings.strategy.minVolumeUsd} />
-        <button type="submit">Guardar</button>
-      </form>
-
-      <div style={{ marginBottom: 10 }}>
-        <label>Filtro de risco ≤ {riskFilter} </label>
-        <input type="range" min={0} max={100} value={riskFilter} onChange={(e) => setRiskFilter(Number(e.target.value))} />
-      </div>
-      <div style={{ marginBottom: 10 }}>
-        <label>Idade máxima do token: {maxAgeFilter}s </label>
-        <input type="range" min={10} max={120} step={5} value={maxAgeFilter} onChange={(e) => setMaxAgeFilter(Number(e.target.value))} />
-      </div>
 
       <table width="100%" cellPadding={6} style={{ borderCollapse: "collapse", marginBottom: 18 }}>
         <thead>
           <tr>
             <th align="left">Token</th>
-            <th align="left">Preço</th>
+            <th align="left">Source</th>
+            <th align="left">Age</th>
+            <th align="left">Price</th>
             <th align="left">Volume</th>
             <th align="left">Buys/s</th>
             <th align="left">Wallets</th>
-            <th align="left">Age</th>
-            <th align="left">Concentração</th>
-            <th align="left">Risco</th>
-            <th align="left">Fonte</th>
+            <th align="left">Parsed trades</th>
             <th align="left">Lifecycle</th>
-            <th align="left">Estado</th>
+            <th align="left">Status</th>
           </tr>
         </thead>
         <tbody>
           {filteredTokens.map((token) => <TokenRow key={token.mintAddress} token={token} />)}
         </tbody>
       </table>
-
-      <section style={{ marginBottom: 18 }}>
-        <h3>Discovery / Debug (não tradáveis ainda)</h3>
-        <ul>
-          {discoveryTokens.map((token) => (
-            <li key={`discovery-${token.mintAddress}`}>
-              {token.symbol} ({token.mintAddress.slice(0, 6)}...) · state={token.lifecycle} · age={formatAge(token.realTokenAgeSeconds, token.realAgeQuality)} · source={token.ageSource}
-            </li>
-          ))}
-        </ul>
-      </section>
+      {showDebug ? (
+        <details style={{ marginBottom: 18 }} open={false}>
+          <summary style={{ cursor: "pointer", marginBottom: 8 }}>Discovery / Debug (hidden tokens: {hiddenTokens.length})</summary>
+          <ul>
+            {hiddenTokens.slice(0, 50).map((token) => (
+              <li key={`debug-${token.mintAddress}`}>
+                {token.symbol} ({token.mintAddress.slice(0, 6)}...) · lifecycle={token.lifecycle} · reason={token.rejectionReason ?? "filtered"} · ageSource={token.ageSource} · metadata={token.metadataSource} · last={new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
 
       <section style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 12 }}>
         <SignalsPanel signals={state.signals.slice(0, 30)} freshSignalIds={freshSignalIds} />
@@ -292,36 +338,26 @@ function TokenRow({ token }: { token: TokenSnapshot }) {
           <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">{token.mintAddress}</a>
         </div>
       </td>
-      <td>{fmtNumber(token.price, 8)}</td>
-      <td>{fmtUsd(token.volumeUsd)}</td>
-      <td>{fmtNumber(token.buysPerSecond, 2)}</td>
-      <td>{token.uniqueWallets ?? "N/A"}</td>
+      <td><span className="badge-source">{token.sourceCategory}</span></td>
       <td>
         {formatAge(token.realTokenAgeSeconds, token.realAgeQuality)}
         <div style={{ fontSize: 11, opacity: 0.8 }}>
           <span className="badge-source">{token.ageSource}</span>
         </div>
       </td>
-      <td>{token.topWalletShare === null ? "N/A" : `${token.topWalletShare.toFixed(1)}%`}</td>
-      <td>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</td>
-      <td><span className="badge-source">{token.source}</span><div style={{fontSize:11,opacity:0.8}}>first: {token.firstDetectedSource}</div></td>
+      <td>{fmtNumber(token.price, 8)}</td>
+      <td>{fmtUsd(token.volumeUsd)}</td>
+      <td>{fmtNumber(token.buysPerSecond, 2)}</td>
+      <td>{token.uniqueWallets ?? "N/A"}</td>
+      <td>{token.parsedTradeCount}</td>
       <td>
         <strong>{token.lifecycle}</strong>
-        <div style={{ fontSize: 11, opacity: 0.8 }}>
-          parsed trades: {token.parsedTradeCount} · ready: {token.sniperReady ? "yes" : "no"}
-        </div>
-        <div style={{ fontSize: 11, opacity: 0.8 }}>
-          real age: {formatAge(token.realTokenAgeSeconds, token.realAgeQuality)} · seen by bot: {formatAge(token.seenByBotAgeSeconds, "exact")}
-        </div>
-        <div style={{ fontSize: 11, opacity: 0.8 }}>
-          real creation time: {fmtTimestamp(token.tokenCreatedAt)} · first trade: {fmtTimestamp(token.firstTradeAt)} · seen by bot time:{" "}
-          {fmtTimestamp(token.firstSeenTimestamp)}
-        </div>
-        <div style={{ fontSize: 11, opacity: 0.8 }}>
-          last metric: {new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}
-        </div>
       </td>
-      <td><span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>{token.confirmationStatus === "confirmed" ? token.discoveryStatus : "partial"} · {token.confirmationStatus}</span><div style={{fontSize:11,opacity:0.8}}>quality: <strong>{token.dataQuality}</strong> · Δsol-pump: {token.sourceLatencyMs["solana-rpc"] !== undefined && token.sourceLatencyMs["pumpportal"] !== undefined ? `${token.sourceLatencyMs["solana-rpc"] - token.sourceLatencyMs["pumpportal"]}ms` : "N/A"}</div></td>
+      <td>
+        <span className={token.confirmationStatus === "confirmed" ? "badge-confirmed" : "badge-unconfirmed"}>
+          {token.confirmationStatus}
+        </span>
+      </td>
     </tr>
   );
 }
@@ -333,11 +369,6 @@ function formatAge(seconds: number | null, quality: "exact" | "estimated" | "unk
   const rem = seconds % 60;
   const base = rem === 0 ? `${minutes}m` : `${minutes}m ${rem}s`;
   return quality === "estimated" ? `~${base}` : base;
-}
-
-function fmtTimestamp(value: number | null) {
-  if (!value) return "unknown";
-  return new Date(value).toLocaleString("pt-PT");
 }
 
 function SignalsPanel({ signals, freshSignalIds }: { signals: Signal[]; freshSignalIds: Set<string> }) {
@@ -375,24 +406,6 @@ function SourceHealthBadge({ source }: { source: MonitorState["sourceHealth"][nu
     <span className={source.connected ? "badge-confirmed" : "badge-unconfirmed"} title={source.warning ?? ""}>
       {source.source}: {source.connected ? "ONLINE" : "OFFLINE"}
     </span>
-  );
-}
-
-function Card({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, background: "#0f172a" }}>
-      <div style={{ fontSize: 12, opacity: 0.75 }}>{label}</div>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function Input({ name, label, defaultValue }: { name: string; label: string; defaultValue: string | number }) {
-  return (
-    <label style={{ display: "grid", gap: 4 }}>
-      <small>{label}</small>
-      <input name={name} defaultValue={defaultValue} style={{ padding: 6, borderRadius: 6 }} />
-    </label>
   );
 }
 

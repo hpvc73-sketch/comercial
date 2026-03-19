@@ -23,6 +23,9 @@ const MAX_RECENT_TRADES = 120;
 const MIN_UNIQUE_WALLETS_FOR_ENTRY = 20;
 const HARD_MAX_TOKEN_AGE_SECONDS = 120;
 const FRESH_TOKEN_AGE_SECONDS = 30;
+const DISCOVERED_TIMEOUT_MS = Number(process.env.DISCOVERED_TIMEOUT_MS ?? 8000);
+const DISCOVERY_PRIMARY = process.env.DISCOVERY_PRIMARY ?? "pumpportal";
+const ALLOW_HELIUS_RPC_DISCOVERY = process.env.ALLOW_HELIUS_RPC_DISCOVERY === "true";
 
 const DEFAULT_SETTINGS: MonitorSettings = {
   paperBankrollUsd: 5000,
@@ -61,6 +64,9 @@ class MonitorEngine extends EventEmitter {
   private lastStallWarningAt = 0;
   private staleAgeWarned = new Set<string>();
   private lastAgeSourceLog = new Map<string, string>();
+  private pendingDiscoveryLogged = new Set<string>();
+  private hiddenWeakLogged = new Set<string>();
+  private promotedVisibleLogged = new Set<string>();
 
   constructor() {
     super();
@@ -103,7 +109,18 @@ class MonitorEngine extends EventEmitter {
   start() {
     if (this.adapters.length > 0) return;
 
-    const detectedEnv = ["SOLANA_RPC_URL", "SOLANA_WS_URL", "HELIUS_API_KEY", "HELIUS_RPC_URL", "HELIUS_WS_URL", "HELIUS_GRPC_WS_URL", "PUMPFUN_PROGRAM_ID"]
+    const detectedEnv = [
+      "SOLANA_RPC_URL",
+      "SOLANA_WS_URL",
+      "HELIUS_API_KEY",
+      "HELIUS_RPC_URL",
+      "HELIUS_WS_URL",
+      "HELIUS_GRPC_WS_URL",
+      "PUMPFUN_PROGRAM_ID",
+      "DISCOVERY_PRIMARY",
+      "ALLOW_HELIUS_RPC_DISCOVERY",
+      "DISCOVERED_TIMEOUT_MS",
+    ]
       .filter((key) => Boolean(process.env[key]));
 
     const heliusRpcUrl =
@@ -149,7 +166,9 @@ class MonitorEngine extends EventEmitter {
     this.streamStallTimer = setInterval(() => this.detectStreamStall(), 20_000);
     this.streamStallTimer.unref();
 
-    this.log("Ingestão multi-source iniciada (pumpportal + solana-rpc + helius-grpc opcional)");
+    this.log(
+      `Ingestão multi-source iniciada (primary=${DISCOVERY_PRIMARY}, allowHeliusDiscovery=${ALLOW_HELIUS_RPC_DISCOVERY ? "true" : "false"})`,
+    );
   }
 
   updateSettings(next: Partial<MonitorSettings>) {
@@ -179,6 +198,38 @@ class MonitorEngine extends EventEmitter {
     if (!plausibleBySuffix) return { ok: false, reason: "non-pump candidate" };
 
     return { ok: true };
+  }
+
+  private metadataRank(source: UnifiedTokenEvent["source"]): number {
+    if (source === "pumpportal") return 3;
+    if (source === "helius-rpc" || source === "helius-grpc") return 2;
+    return 1;
+  }
+
+  private hasKnownMetadata(symbol?: string, name?: string): boolean {
+    const cleanSymbol = (symbol ?? "").trim();
+    const cleanName = (name ?? "").trim();
+    const symbolKnown = cleanSymbol.length > 0 && cleanSymbol.toUpperCase() !== "UNKNOWN";
+    const nameKnown = cleanName.length > 0 && cleanName.toLowerCase() !== "unknown token";
+    return symbolKnown || nameKnown;
+  }
+
+  private sourceCategory(token: LiveTokenState): TokenSnapshot["sourceCategory"] {
+    const hasPump = token.detectedAtBySource.has("pumpportal");
+    const hasHelius = token.detectedAtBySource.has("helius-rpc") || token.detectedAtBySource.has("helius-grpc");
+    if (hasPump && hasHelius) return "merged";
+    if (hasPump) return "pumpportal";
+    return "helius-enriched";
+  }
+
+  private canBeVisibleWithPrimaryRules(token: LiveTokenState, ageSource: TokenSnapshot["ageSource"]): boolean {
+    const hasPumpSignal = token.detectedAtBySource.has("pumpportal") || token.firstDetectedSource === "pumpportal";
+    const hasKnownAge = ageSource !== "unknown";
+    const hasMetadata = this.hasKnownMetadata(token.symbol, token.name);
+    const hasParsedTrade = token.parsedTradeCount >= 1 || token.recentTrades.length >= 1;
+    if (hasPumpSignal) return true;
+    if (ALLOW_HELIUS_RPC_DISCOVERY && hasKnownAge && hasMetadata) return true;
+    return hasParsedTrade && hasKnownAge && hasMetadata;
   }
 
   private onUnifiedEvent(event: UnifiedTokenEvent) {
@@ -224,19 +275,38 @@ class MonitorEngine extends EventEmitter {
     token.updatedAt = event.timestamp;
     const previousSymbol = token.symbol;
     const previousName = token.name;
-    if (event.symbol) token.symbol = event.symbol;
-    if (event.name) token.name = event.name;
-    if ((token.symbol !== previousSymbol || token.name !== previousName) && token.symbol !== "UNKNOWN" && token.name !== "Unknown Token") {
+    const incomingMetadataKnown = this.hasKnownMetadata(event.symbol, event.name);
+    const currentMetadataKnown = this.hasKnownMetadata(token.symbol, token.name);
+    const incomingRank = this.metadataRank(event.source);
+    if (incomingMetadataKnown && (!currentMetadataKnown || incomingRank >= token.metadataQualityScore)) {
+      if (event.symbol && event.symbol.toUpperCase() !== "UNKNOWN") token.symbol = event.symbol;
+      if (event.name && event.name.toLowerCase() !== "unknown token") token.name = event.name;
+      token.metadataQualityScore = incomingRank;
+      token.metadataSource = event.source;
+    }
+    if ((token.symbol !== previousSymbol || token.name !== previousName) && this.hasKnownMetadata(token.symbol, token.name)) {
       this.log(`metadata resolved name/symbol ${token.mintAddress}: ${token.name} (${token.symbol})`);
     }
     token.source = event.source;
 
     const existingDetectedAt = token.detectedAtBySource.get(event.source);
     if (!existingDetectedAt) token.detectedAtBySource.set(event.source, event.timestamp);
+    if (!existingDetectedAt && token.detectedAtBySource.size >= 2) {
+      this.log(`token merged from multiple sources ${token.mintAddress}`);
+    }
 
     if (event.timestamp < token.firstDetectedAt) {
       token.firstDetectedAt = event.timestamp;
       token.firstDetectedSource = event.source;
+    }
+    if (
+      event.source === "helius-rpc" &&
+      token.firstDetectedSource === "helius-rpc" &&
+      !token.detectedAtBySource.has("pumpportal") &&
+      !this.pendingDiscoveryLogged.has(token.mintAddress)
+    ) {
+      this.pendingDiscoveryLogged.add(token.mintAddress);
+      this.log(`helius-rpc discovery kept pending ${token.mintAddress}`);
     }
     if (event.tokenCreatedAt && event.tokenCreatedAt > 0) {
       token.tokenCreatedAt = token.tokenCreatedAt ? Math.min(token.tokenCreatedAt, event.tokenCreatedAt) : event.tokenCreatedAt;
@@ -433,11 +503,18 @@ class MonitorEngine extends EventEmitter {
           chosenAgeSource === "unknown" ? "unknown" : chosenAgeSource === "estimated" ? "estimated" : "exact";
         const hadTradeObservation = token.recentTrades.length > 0 || token.parsedTradeCount > 0 || parsedTradesTotal > 0;
         const hasRealMetrics = token.priceUsd !== null || token.volumeUsd !== null || buysPerSecond !== null;
+        const hasKnownMetadata = this.hasKnownMetadata(token.symbol, token.name);
+        const discoveredTimedOut = now - token.firstDetectedAt > DISCOVERED_TIMEOUT_MS;
         let lifecycle: TokenSnapshot["lifecycle"] = "discovered";
         if (token.rejectionReason) lifecycle = "rejected";
         else if (Date.now() - token.updatedAt > 180_000) lifecycle = "expired";
         else if (hadTradeObservation) lifecycle = "enriching";
         if (lifecycle === "enriching" && (token.parsedTradeCount >= 1 || hasRealMetrics)) lifecycle = "enriched";
+        if (lifecycle === "discovered" && discoveredTimedOut && !hadTradeObservation && !hasKnownMetadata) {
+          lifecycle = "rejected";
+          token.rejectionReason = token.rejectionReason ?? "discovery timeout without enrichment";
+          this.log(`token expired without enrichment ${token.mintAddress}`);
+        }
 
         if (
           lifecycle !== "rejected" &&
@@ -455,6 +532,25 @@ class MonitorEngine extends EventEmitter {
           this.log(`lifecycle transition ${token.mintAddress}: ${token.lifecycle} -> ${lifecycle}`);
         }
         token.lifecycle = lifecycle;
+        const sourceCategory = this.sourceCategory(token);
+        const visibleByPrimary = this.canBeVisibleWithPrimaryRules(token, chosenAgeSource);
+        const hasUsefulMetric = token.priceUsd !== null || token.volumeUsd !== null || buysPerSecond !== null || token.buyerWallets.size > 0;
+        const visibleInMain =
+          visibleByPrimary &&
+          (lifecycle === "enriched" ||
+            lifecycle === "tradable" ||
+            token.parsedTradeCount >= 1 ||
+            token.recentTrades.length >= 1 ||
+            (hasKnownMetadata && chosenAgeSource !== "unknown" && hasUsefulMetric)) &&
+          !(!hasKnownMetadata && chosenAgeSource === "unknown" && token.priceUsd === null && token.volumeUsd === null && buysPerSecond === null && token.parsedTradeCount === 0);
+        if (!visibleInMain && !this.hiddenWeakLogged.has(token.mintAddress)) {
+          this.hiddenWeakLogged.add(token.mintAddress);
+          this.log(`token hidden from main table because weak discovery ${token.mintAddress}`);
+        }
+        if (visibleInMain && !this.promotedVisibleLogged.has(token.mintAddress) && token.firstDetectedSource !== DISCOVERY_PRIMARY) {
+          this.promotedVisibleLogged.add(token.mintAddress);
+          this.log(`token promoted from pending to visible ${token.mintAddress}`);
+        }
         const sniperReady =
           lifecycle === "tradable" &&
           chosenAgeSource !== "estimated" &&
@@ -521,6 +617,9 @@ class MonitorEngine extends EventEmitter {
           liquidityEstimate,
           rejectionReason: token.rejectionReason,
           sourceConfidence,
+          metadataSource: token.metadataSource,
+          sourceCategory,
+          visibleInMain,
           uniqueWallets: token.buyerWallets.size > 0 ? token.buyerWallets.size : null,
           uniqueBuyers30s,
           uniqueTraders30s,

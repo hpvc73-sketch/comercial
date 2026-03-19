@@ -43,6 +43,8 @@ export interface LiveTokenState {
   detectedAtBySource: Map<DataSource, number>;
   firstDetectedSource: DataSource;
   firstDetectedAt: number;
+  metadataQualityScore: number;
+  metadataSource: DataSource;
 }
 
 export class LiveStateStore {
@@ -85,6 +87,8 @@ export class LiveStateStore {
       detectedAtBySource: new Map<DataSource, number>([[defaults.source, defaults.timestamp]]),
       firstDetectedSource: defaults.source,
       firstDetectedAt: defaults.timestamp,
+      metadataQualityScore: 0,
+      metadataSource: defaults.source,
     };
 
     this.tokens.set(mintAddress, token);
