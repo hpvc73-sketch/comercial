@@ -9,6 +9,10 @@ export interface UnifiedTokenEvent {
   mintAddress?: string;
   symbol?: string;
   name?: string;
+  uri?: string;
+  metadataUri?: string;
+  creator?: string;
+  signature?: string;
   timestamp: number;
   tokenCreatedAt?: number;
   pairCreatedAt?: number;

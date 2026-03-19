@@ -19,17 +19,37 @@ function readTimestampMs(payload: Record<string, unknown>, keys: string[]): numb
   return Math.floor(value);
 }
 
+function readString(payload: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 export function normalizePumpPortalPayload(payload: Record<string, unknown>, eventType: UnifiedTokenEvent["eventType"]): UnifiedTokenEvent | null {
   const mintAddress =
     (typeof payload.mint === "string" && payload.mint) ||
     (typeof payload.mintAddress === "string" && payload.mintAddress) ||
+    (typeof payload.tokenAddress === "string" && payload.tokenAddress) ||
+    (typeof payload.address === "string" && payload.address) ||
     (typeof payload.ca === "string" && payload.ca) ||
     "";
 
   if (!mintAddress) return null;
 
-  const symbol = typeof payload.symbol === "string" ? payload.symbol : undefined;
-  const name = typeof payload.name === "string" ? payload.name : symbol;
+  const symbol =
+    readString(payload, ["symbol", "tokenSymbol", "ticker", "baseSymbol", "baseTokenSymbol"]) ??
+    (readString(payload, ["name", "tokenName"]) ? readString(payload, ["name", "tokenName"]) : undefined);
+  const name =
+    readString(payload, ["name", "tokenName", "baseName", "baseTokenName", "projectName"]) ??
+    symbol;
+  const uri = readString(payload, ["uri", "tokenUri", "image", "imageUrl"]);
+  const metadataUri = readString(payload, ["metadataUri", "metadataURI", "metaUri", "metadata_url"]);
+  const creator = readString(payload, ["creator", "creatorAddress", "dev", "deployer", "owner"]);
+  const signature = readString(payload, ["signature", "sig", "txSignature", "txHash"]);
+  const trader =
+    readString(payload, ["traderPublicKey", "trader", "user", "wallet", "owner", "buyer", "seller"]);
   const txType = typeof payload.txType === "string" ? payload.txType.toLowerCase() : "";
   const isBuy = txType.includes("buy");
   const isSell = txType.includes("sell");
@@ -41,15 +61,22 @@ export function normalizePumpPortalPayload(payload: Record<string, unknown>, eve
   const solAmount = readNumber(payload, ["solAmount", "amountSol", "solIn", "solOut"]);
   const tokenCreatedAt = readTimestampMs(payload, ["tokenCreatedAt", "createdAt", "createdTimestamp", "mintedAt", "time"]);
   const pairCreatedAt = readTimestampMs(payload, ["pairCreatedAt", "poolCreatedAt", "liquidityCreatedAt", "pairCreatedTimestamp"]);
+  const eventTimestamp =
+    readTimestampMs(payload, ["timestamp", "time", "blockTime", "createdAt", "tokenCreatedAt"]) ??
+    Date.now();
 
   return {
-    eventId: `${eventType}:${mintAddress}:${payload.signature ?? payload.timestamp ?? Date.now()}`,
+    eventId: `${eventType}:${mintAddress}:${signature ?? eventTimestamp}`,
     source: "pumpportal",
     eventType,
     mintAddress,
     symbol,
     name,
-    timestamp: Date.now(),
+    uri,
+    metadataUri,
+    creator,
+    signature,
+    timestamp: eventTimestamp,
     tokenCreatedAt,
     pairCreatedAt,
     discoveryStatus: eventType === "migrated" ? "migrated" : eventType === "discovered" ? "discovered" : undefined,
@@ -62,9 +89,6 @@ export function normalizePumpPortalPayload(payload: Record<string, unknown>, eve
     tradeSide: isBuy ? "buy" : isSell ? "sell" : undefined,
     buysDelta,
     sellsDelta,
-    trader:
-      (typeof payload.traderPublicKey === "string" && payload.traderPublicKey) ||
-      (typeof payload.user === "string" && payload.user) ||
-      undefined,
+    trader,
   };
 }

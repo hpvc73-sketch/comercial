@@ -222,8 +222,13 @@ class MonitorEngine extends EventEmitter {
     this.enrichFromHeliusIfNeeded(token.mintAddress);
 
     token.updatedAt = event.timestamp;
+    const previousSymbol = token.symbol;
+    const previousName = token.name;
     if (event.symbol) token.symbol = event.symbol;
     if (event.name) token.name = event.name;
+    if ((token.symbol !== previousSymbol || token.name !== previousName) && token.symbol !== "UNKNOWN" && token.name !== "Unknown Token") {
+      this.log(`metadata resolved name/symbol ${token.mintAddress}: ${token.name} (${token.symbol})`);
+    }
     token.source = event.source;
 
     const existingDetectedAt = token.detectedAtBySource.get(event.source);
@@ -266,59 +271,63 @@ class MonitorEngine extends EventEmitter {
     const canUseSecondary = token.pumpPortalTradeCount === 0;
 
     if (isPumpPortalTrade) token.pumpPortalTradeCount += 1;
-    if (event.eventType === "trade") {
+    const shouldApplyMetrics = isPumpPortalTrade || canUseSecondary;
+    const hasTradePayload = tradeSide !== undefined && (typeof tradeUsd === "number" || event.priceUsd || event.tradeTokenAmount || event.tradeSolAmount);
+    if (shouldApplyMetrics && hasTradePayload) {
+      if (event.priceUsd && event.priceUsd > 0) {
+        token.priceUsd = event.priceUsd;
+        this.log(`price updated ${token.symbol} ${token.mintAddress}: ${event.priceUsd.toFixed(8)}`);
+      }
+      if (typeof tradeUsd === "number" && tradeUsd > 0) {
+        token.volumeUsd = (token.volumeUsd ?? 0) + tradeUsd;
+        this.log(`volume updated ${token.symbol} ${token.mintAddress}: ${token.volumeUsd.toFixed(2)} USD`);
+      }
+      if (tradeSide === "buy") {
+        token.buys += 1;
+        token.buyTimestamps.push(event.timestamp);
+        token.parsedBuysTotal += 1;
+        this.log(`buy detected ${token.symbol} ${token.mintAddress}`);
+      } else if (tradeSide === "sell") {
+        token.sells += 1;
+        token.sellTimestamps.push(event.timestamp);
+        token.parsedSellsTotal += 1;
+      }
+      token.parsedTradeCount += 1;
       token.firstTradeAt = token.firstTradeAt ? Math.min(token.firstTradeAt, event.timestamp) : event.timestamp;
       if (token.firstTradeConfidence === "unknown") token.firstTradeConfidence = "live";
-      this.log(`age-derivation first trade at ${new Date(token.firstTradeAt).toISOString()} ${token.mintAddress}`);
-    }
-    const ageEvidence = this.deriveAgeEvidence(token);
-    const ageLogKey = `${ageEvidence.source}:${ageEvidence.createdAt ?? "na"}`;
-    if (this.lastAgeSourceLog.get(token.mintAddress) !== ageLogKey) {
-      this.lastAgeSourceLog.set(token.mintAddress, ageLogKey);
-      this.log(
-        `age-derivation chosen source=${ageEvidence.source} value=${ageEvidence.createdAt ? new Date(ageEvidence.createdAt).toISOString() : "unknown"} ${token.mintAddress}`,
-      );
-    }
-
-    const shouldApplyMetrics = isPumpPortalTrade || canUseSecondary;
-    if (shouldApplyMetrics && event.priceUsd && event.priceUsd > 0) {
-      token.priceUsd = event.priceUsd;
-      this.log(`price updated ${token.symbol} ${token.mintAddress}: ${event.priceUsd.toFixed(8)}`);
-    }
-    if (shouldApplyMetrics && typeof tradeUsd === "number" && tradeUsd > 0) {
-      token.volumeUsd = (token.volumeUsd ?? 0) + tradeUsd;
-      this.log(`volume updated ${token.symbol} ${token.mintAddress}: ${token.volumeUsd.toFixed(2)} USD`);
-    }
-    if (shouldApplyMetrics && event.buysDelta) {
-      token.buys += event.buysDelta;
-      token.buyTimestamps.push(event.timestamp);
-      this.log(`buy detected ${token.symbol} ${token.mintAddress}`);
-    }
-    if (shouldApplyMetrics && event.sellsDelta) token.sells += event.sellsDelta;
-    if (shouldApplyMetrics && event.sellsDelta) token.sellTimestamps.push(event.timestamp);
-    if (shouldApplyMetrics && event.trader) {
-      token.traders.add(event.trader);
-      if (tradeSide === "buy") {
-        const preSize = token.buyerWallets.size;
-        token.buyerWallets.add(event.trader);
-        if (token.buyerWallets.size > preSize) {
-          this.log(`wallet added ${token.symbol} ${token.mintAddress}: ${event.trader}`);
-        }
-      }
-      const current = token.traderVolumeUsd.get(event.trader) ?? 0;
-      token.traderVolumeUsd.set(event.trader, current + (tradeUsd ?? 0));
-    }
-
-    if (shouldApplyMetrics && tradeSide && (typeof tradeUsd === "number" || event.priceUsd || event.tradeTokenAmount || event.tradeSolAmount)) {
       token.recentTrades.push({
         timestamp: event.timestamp,
-        side: tradeSide,
+        side: tradeSide as "buy" | "sell",
         wallet: event.trader,
         usdAmount: tradeUsd,
         priceUsd: event.priceUsd,
         tokenAmount: event.tradeTokenAmount,
         solAmount: event.tradeSolAmount,
       });
+      if (event.trader) {
+        token.traders.add(event.trader);
+        if (tradeSide === "buy") {
+          const preSize = token.buyerWallets.size;
+          token.buyerWallets.add(event.trader);
+          if (token.buyerWallets.size > preSize) {
+            this.log(`wallet added ${token.symbol} ${token.mintAddress}: ${event.trader}`);
+          }
+        }
+        const current = token.traderVolumeUsd.get(event.trader) ?? 0;
+        token.traderVolumeUsd.set(event.trader, current + (tradeUsd ?? 0));
+      }
+      this.log(`parsed trade accepted for ${token.mintAddress}`);
+      this.log(`parsedTradeCount value ${token.mintAddress}: ${token.parsedTradeCount}`);
+      this.log(`age-derivation first trade at ${new Date(token.firstTradeAt).toISOString()} ${token.mintAddress}`);
+    }
+
+    const ageEvidence = this.deriveAgeEvidence(token);
+    const ageLogKey = `${ageEvidence.source}:${ageEvidence.createdAt ?? "na"}`;
+    if (this.lastAgeSourceLog.get(token.mintAddress) !== ageLogKey) {
+      this.lastAgeSourceLog.set(token.mintAddress, ageLogKey);
+      this.log(
+        `age evidence chosen source=${ageEvidence.source} timestamp=${ageEvidence.createdAt ?? "unknown"} ${token.mintAddress}`,
+      );
     }
 
     const cutoff = Date.now() - BUY_WINDOW_MS;
@@ -365,9 +374,9 @@ class MonitorEngine extends EventEmitter {
         const volume30s = trades30s.reduce((sum, trade) => sum + (trade.usdAmount ?? 0), 0);
         const uniqueBuyers30s = new Set(trades30s.filter((t) => t.side === "buy").map((t) => t.wallet).filter(Boolean)).size;
         const uniqueTraders30s = new Set(trades30s.map((t) => t.wallet).filter(Boolean)).size;
-        const parsedBuysTotal = token.buyTimestamps.length;
-        const parsedSellsTotal = token.sellTimestamps.length;
-        const parsedTradesTotal = token.recentTrades.length;
+        const parsedBuysTotal = token.parsedBuysTotal;
+        const parsedSellsTotal = token.parsedSellsTotal;
+        const parsedTradesTotal = token.parsedTradeCount;
 
         const totalTraderVolume = Array.from(token.traderVolumeUsd.values()).reduce((sum, value) => sum + value, 0);
         const topTraderVolume = token.traderVolumeUsd.size > 0 ? Math.max(...token.traderVolumeUsd.values()) : 0;
@@ -422,11 +431,13 @@ class MonitorEngine extends EventEmitter {
         }
         const realAgeQuality: TokenSnapshot["realAgeQuality"] =
           chosenAgeSource === "unknown" ? "unknown" : chosenAgeSource === "estimated" ? "estimated" : "exact";
+        const hadTradeObservation = token.recentTrades.length > 0 || token.parsedTradeCount > 0 || parsedTradesTotal > 0;
+        const hasRealMetrics = token.priceUsd !== null || token.volumeUsd !== null || buysPerSecond !== null;
         let lifecycle: TokenSnapshot["lifecycle"] = "discovered";
         if (token.rejectionReason) lifecycle = "rejected";
         else if (Date.now() - token.updatedAt > 180_000) lifecycle = "expired";
-        else if (token.parsedTradeCount > 0) lifecycle = "enriched";
-        else if (token.recentTrades.length > 0) lifecycle = "enriching";
+        else if (hadTradeObservation) lifecycle = "enriching";
+        if (lifecycle === "enriching" && (token.parsedTradeCount >= 1 || hasRealMetrics)) lifecycle = "enriched";
 
         if (
           lifecycle !== "rejected" &&
@@ -439,6 +450,9 @@ class MonitorEngine extends EventEmitter {
           token.priceUsd !== null
         ) {
           lifecycle = "tradable";
+        }
+        if (token.lifecycle !== lifecycle) {
+          this.log(`lifecycle transition ${token.mintAddress}: ${token.lifecycle} -> ${lifecycle}`);
         }
         token.lifecycle = lifecycle;
         const sniperReady =
@@ -772,28 +786,18 @@ class MonitorEngine extends EventEmitter {
     source: TokenSnapshot["ageSource"];
     createdAt: number | null;
   } {
-    const launchCreatedAt = token.tokenAgeSource === "launch" ? token.tokenCreatedAt : null;
-    const source: TokenSnapshot["ageSource"] =
-      launchCreatedAt !== null
-        ? "launch"
-        : token.firstTradeAt !== null && token.firstTradeConfidence === "history"
-            ? "first-trade"
-            : token.firstTradeAt !== null
-              ? "estimated"
-            : token.tokenCreatedAt !== null
-              ? token.tokenAgeSource
-              : "unknown";
-
-    const createdAt =
-      source === "launch"
-        ? launchCreatedAt
-        : source === "first-trade"
-            ? token.firstTradeAt
-            : source === "on-chain" || source === "provider" || source === "estimated"
-              ? token.tokenCreatedAt
-              : null;
-
-    return { source, createdAt };
+    if (token.tokenCreatedAt !== null) {
+      const source: TokenSnapshot["ageSource"] = token.tokenAgeSource === "on-chain" ? "on-chain" : "provider";
+      return { source, createdAt: token.tokenCreatedAt };
+    }
+    if (token.pairCreatedAt !== null) {
+      return { source: "launch", createdAt: token.pairCreatedAt };
+    }
+    if (token.firstTradeAt !== null) {
+      if (token.firstTradeConfidence === "history") return { source: "first-trade", createdAt: token.firstTradeAt };
+      return { source: "estimated", createdAt: token.firstTradeAt };
+    }
+    return { source: "unknown", createdAt: null };
   }
 
   private async enrichFromHeliusIfNeeded(mintAddress: string) {
