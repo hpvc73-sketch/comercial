@@ -259,7 +259,10 @@ export default function HomePage() {
         <h1 style={{ marginBottom: 8 }}>Pump Sniper Dashboard</h1>
         <div className={state.dataMode === "live" ? "mode-badge live" : "mode-badge warn"}>{dataBadge}</div>
       </div>
-      <p style={{ opacity: 0.85, marginTop: 0 }}>Status stream: {status === "connected" ? "SSE live" : "Fallback polling"}</p>
+      <p style={{ opacity: 0.85, marginTop: 0 }}>
+        Status stream: {state.streamStats.streamStatus} · transport: {status === "connected" ? "SSE live" : "Fallback polling"} · last real event age:{" "}
+        {state.streamStats.lastRealEventAgeSeconds}s
+      </p>
       {state.dataWarning ? <p className="warning-box">⚠ {state.dataWarning}</p> : null}
       <p style={{ fontSize: 12, opacity: 0.9 }}>
         last token received: <strong>{new Date(state.streamStats.lastTokenReceivedAt).toLocaleTimeString("pt-PT")}</strong> · last live update:{" "}

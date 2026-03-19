@@ -5,25 +5,40 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const engine = getMonitorEngine();
   const encoder = new TextEncoder();
+  let keepAlive: NodeJS.Timeout | undefined;
+  let listener: (() => void) | undefined;
+
+  const cleanup = () => {
+    if (keepAlive) clearInterval(keepAlive);
+    keepAlive = undefined;
+    if (listener) engine.off("update", listener);
+    listener = undefined;
+  };
 
   const stream = new ReadableStream({
     start(controller) {
       const sendState = () => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(engine.getState())}\n\n`));
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(engine.getState())}\n\n`));
+        } catch {
+          cleanup();
+        }
       };
 
       sendState();
-      const listener = () => sendState();
+      listener = () => sendState();
       engine.on("update", listener);
 
-      const keepAlive = setInterval(() => {
-        controller.enqueue(encoder.encode(`event: ping\ndata: ${Date.now()}\n\n`));
+      keepAlive = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(`event: ping\ndata: ${Date.now()}\n\n`));
+        } catch {
+          cleanup();
+        }
       }, 15000);
-
-      return () => {
-        clearInterval(keepAlive);
-        engine.off("update", listener);
-      };
+    },
+    cancel() {
+      cleanup();
     },
   });
 

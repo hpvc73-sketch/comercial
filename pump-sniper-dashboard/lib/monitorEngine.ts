@@ -100,6 +100,9 @@ class MonitorEngine extends EventEmitter {
         receivedLast60s: 0,
         lastTokenReceivedAt: Date.now(),
         lastLiveUpdateAt: Date.now(),
+        lastRealEventAt: Date.now(),
+        lastRealEventAgeSeconds: 0,
+        streamStatus: "reconnecting",
       },
     };
   }
@@ -276,6 +279,9 @@ class MonitorEngine extends EventEmitter {
     this.state.streamStats.receivedLast60s = this.streamEventTimestamps.length;
     this.state.streamStats.lastLiveUpdateAt = Date.now();
     this.state.streamStats.lastTokenReceivedAt = Date.now();
+    this.state.streamStats.lastRealEventAt = Date.now();
+    this.state.streamStats.lastRealEventAgeSeconds = 0;
+    this.state.streamStats.streamStatus = "live";
 
     const candidate = this.validatePumpCandidate(event);
     if (!candidate.ok) {
@@ -726,11 +732,17 @@ class MonitorEngine extends EventEmitter {
 
   private detectStreamStall() {
     const secondsSinceToken = Math.floor((Date.now() - this.state.streamStats.lastTokenReceivedAt) / 1000);
+    const secondsSinceRealEvent = Math.floor((Date.now() - this.state.streamStats.lastRealEventAt) / 1000);
+    this.state.streamStats.lastRealEventAgeSeconds = secondsSinceRealEvent;
     const hasAnyConnectedSource = this.state.sourceHealth.some((entry) => entry.connected);
     if (hasAnyConnectedSource && secondsSinceToken > 75 && Date.now() - this.lastStallWarningAt > 60_000) {
       this.lastStallWarningAt = Date.now();
       this.log(`warning: stream connected but no new tokens for ${secondsSinceToken}s`);
     }
+    if (!hasAnyConnectedSource) this.state.streamStats.streamStatus = "reconnecting";
+    else if (secondsSinceRealEvent > 20) this.state.streamStats.streamStatus = "stale";
+    else this.state.streamStats.streamStatus = "live";
+    this.emitUpdate();
   }
 
   private upsertSignalForSnapshot(token: TokenSnapshot) {

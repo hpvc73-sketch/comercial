@@ -177,5 +177,8 @@ export interface MonitorState {
     receivedLast60s: number;
     lastTokenReceivedAt: number;
     lastLiveUpdateAt: number;
+    lastRealEventAt: number;
+    lastRealEventAgeSeconds: number;
+    streamStatus: "live" | "stale" | "reconnecting";
   };
 }
