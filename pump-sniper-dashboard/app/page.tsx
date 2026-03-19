@@ -48,9 +48,15 @@ function selectMainTableTokens(tokens: TokenSnapshot[], resultCount: number) {
 }
 
 function selectSignalsTokens(tokens: TokenSnapshot[], resultCount: number) {
-  const tradable = tokens.filter((token) => token.tier === "tradable").sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt);
+  const validSignalToken = (token: TokenSnapshot) => {
+    const metadataKnown = token.symbol.trim().toUpperCase() !== "UNKNOWN" && token.name.trim().toLowerCase() !== "unknown token";
+    const hasParsedTrade = token.parsedTradeCount > 0 || token.parsedTradesTotal > 0;
+    const hasMarketData = token.price !== null || token.volumeUsd !== null;
+    return (token.tier === "candidate" || token.tier === "tradable") && metadataKnown && hasParsedTrade && hasMarketData;
+  };
+  const tradable = tokens.filter((token) => token.tier === "tradable" && validSignalToken(token)).sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt);
   if (tradable.length > 0) return tradable.slice(0, resultCount);
-  const candidates = tokens.filter((token) => token.tier === "candidate").sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt);
+  const candidates = tokens.filter((token) => token.tier === "candidate" && validSignalToken(token)).sort((a, b) => b.lastMetricUpdateAt - a.lastMetricUpdateAt);
   return candidates.slice(0, Math.max(1, Math.min(resultCount, 10)));
 }
 
@@ -405,28 +411,32 @@ function SignalsPanel({ tokens, freshSignalIds }: { tokens: TokenSnapshot[]; fre
   return (
     <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 10, background: "#0f172a" }}>
       <h3 style={{ marginTop: 0 }}>Signals (candidate/tradable)</h3>
-      <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
-        {tokens.map((token) => {
-          const signalId = `${token.mintAddress}:${token.tier}`;
-          const isFresh = freshSignalIds.has(signalId);
-          return (
-            <li key={signalId} className={isFresh ? "signal-item signal-fresh" : "signal-item"}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
-                <a className="token-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
-                  <strong>{token.symbol}</strong> <span style={{ opacity: 0.8 }}>({token.name})</span>
+      {tokens.length === 0 ? (
+        <p style={{ opacity: 0.8, margin: 0 }}>No valid signal candidates yet</p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
+          {tokens.map((token) => {
+            const signalId = `${token.mintAddress}:${token.tier}`;
+            const isFresh = freshSignalIds.has(signalId);
+            return (
+              <li key={signalId} className={isFresh ? "signal-item signal-fresh" : "signal-item"}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 6 }}>
+                  <a className="token-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer">
+                    <strong>{token.symbol}</strong> <span style={{ opacity: 0.8 }}>({token.name})</span>
+                  </a>
+                  <span style={{ opacity: 0.8 }}>{new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}</span>
+                </div>
+                <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
+                  {token.mintAddress}
                 </a>
-                <span style={{ opacity: 0.8 }}>{new Date(token.lastMetricUpdateAt).toLocaleTimeString("pt-PT")}</span>
-              </div>
-              <a className="mint-link" href={phantomLink(token.mintAddress)} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
-                {token.mintAddress}
-              </a>
-              <div style={{ marginTop: 4, fontSize: 13 }}>
-                <strong>{token.tier}</strong> · buys/s <strong>{fmtNumber(token.buysPerSecond, 2)}</strong> · price <strong>{fmtNumber(token.price, 8)}</strong> · risco <strong>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(token.volumeUsd)}</strong> · parsed trades <strong>{token.parsedTradeCount}</strong> · source <strong>{token.sourceCategory}</strong> · status <strong>{token.lifecycle}</strong>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+                <div style={{ marginTop: 4, fontSize: 13 }}>
+                  <strong>{token.tier}</strong> · buys/s <strong>{fmtNumber(token.buysPerSecond, 2)}</strong> · price <strong>{fmtNumber(token.price, 8)}</strong> · risco <strong>{token.riskScore === null ? "N/A" : token.riskScore.toFixed(1)}</strong> · volume <strong>{fmtUsd(token.volumeUsd)}</strong> · parsed trades <strong>{token.parsedTradeCount}</strong> · source <strong>{token.sourceCategory}</strong> · status <strong>{token.lifecycle}</strong>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
