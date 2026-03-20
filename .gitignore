@@ -1,0 +1,4 @@
+node_modules
+.next
+pump-sniper-dashboard/node_modules
+pump-sniper-dashboard/.next
